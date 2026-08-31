@@ -1,0 +1,38 @@
+from enum import StrEnum
+
+
+class DraftStatus(StrEnum):
+    GENERATED = "GENERATED"
+    VALIDATING = "VALIDATING"
+    READY = "READY"
+    INVALID = "INVALID"
+    APPROVED = "APPROVED"
+    PUBLISHING = "PUBLISHING"
+    PUBLISHED = "PUBLISHED"
+    FAILED = "FAILED"
+    EXCLUDED = "EXCLUDED"
+    CANCELLED = "CANCELLED"
+    UNKNOWN_EXTERNAL_STATE = "UNKNOWN_EXTERNAL_STATE"
+
+
+class JobStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    PARTIAL = "PARTIAL"
+    FAILED = "FAILED"
+    CANCELLED = "CANCELLED"
+
+
+class JobItemStatus(StrEnum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    SUCCEEDED = "SUCCEEDED"
+    FAILED = "FAILED"
+    UNKNOWN = "UNKNOWN"
+    CANCELLED = "CANCELLED"
+
+
+class ValidationSeverity(StrEnum):
+    ERROR = "ERROR"
+    WARNING = "WARNING"

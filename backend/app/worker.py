@@ -1,0 +1,524 @@
+import logging
+import time
+import uuid
+
+from sqlalchemy import select
+
+from app.accounts.service import load_access_token
+from app.core.config import get_settings
+from app.core.db import SessionLocal
+from app.core.enums import DraftStatus, JobItemStatus, JobStatus
+from app.core.time import utcnow
+from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
+from app.persistence import (
+    DraftBatch, Job, JobItem, ProductVersion, Publication, PublicationAttempt, PublicationDraft
+)
+from app.publication.errors import build_mercadolibre_error
+from app.publication.payload import build_item_payload, publication_title_intent
+from app.publication.quantity_pricing import normalize_b2b_quantity_prices, sync_b2b_quantity_prices
+from app.worker_runtime import heartbeat_worker, register_worker, unregister_worker
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("ml-worker")
+settings = get_settings()
+
+
+def claim_job():
+    with SessionLocal() as db:
+        job = db.scalar(
+            select(Job)
+            .where(Job.status == JobStatus.PENDING)
+            .order_by(Job.created_at)
+            .with_for_update(skip_locked=True)
+            .limit(1)
+        )
+        if not job:
+            return None
+        job.status = JobStatus.RUNNING
+        job.started_at = utcnow()
+        job_id = job.id
+        db.commit()
+        logger.info("publication_job_claimed job=%s total=%d", job_id, job.total)
+        return job_id
+
+
+def image_urls_for_worker(version: ProductVersion, draft: PublicationDraft) -> list[str]:
+    configured = (version.logistics or {}).get("public_image_base_url", "").strip().rstrip("/")
+    root = configured or settings.public_base_url
+    if not root.startswith("https://"):
+        return []
+    image_base = root if configured else f"{root}/uploads"
+    images = {str(img.id): img for img in version.images}
+    return [
+        f"{image_base}/{image_id}"
+        for image_id in draft.image_order
+        if str(image_id) in images
+    ]
+
+
+def _existing_confirmed_publication(db, draft_id):
+    publication = db.scalar(select(Publication).where(Publication.draft_id == draft_id))
+    if publication and publication.status == DraftStatus.PUBLISHED:
+        return publication
+    return None
+
+
+
+
+def _description_sync_status(publication: Publication) -> str:
+    response = publication.external_response or {}
+    sync = response.get("_description_sync") or {}
+    return str(sync.get("status") or "").upper()
+
+
+def _set_description_sync(publication: Publication, *, status: str, detail: dict | None = None) -> None:
+    response = dict(publication.external_response or {})
+    response["_description_sync"] = {"status": status, **(detail or {})}
+    publication.external_response = response
+
+
+def _sync_description(db, *, client: MercadoLibreClient, publication: Publication, version: ProductVersion, item: JobItem, draft: PublicationDraft, attempt: PublicationAttempt) -> tuple[bool, bool]:
+    description = (version.description or "").strip()
+    if not description:
+        _set_description_sync(publication, status="NOT_REQUESTED")
+        return True, False
+
+    if _description_sync_status(publication) == "SYNCED":
+        return True, False
+
+    try:
+        response = client.create_item_description(publication.item_id, description)
+        _set_description_sync(
+            publication,
+            status="SYNCED",
+            detail={"http_status": response.status_code},
+        )
+        db.commit()
+        logger.info("publication_description_succeeded draft=%s item_id=%s", draft.id, publication.item_id)
+        return True, False
+    except MercadoLibreError as exc:
+        retry = exc.retryable and item.attempts < settings.worker_max_attempts
+        error = build_mercadolibre_error(exc, retryable=retry)
+        error["code"] = "DESCRIPTION_SYNC_FAILED"
+        _set_description_sync(
+            publication,
+            status="FAILED",
+            detail={"http_status": exc.status_code, "error": error},
+        )
+        attempt.outcome = "DESCRIPTION_FAILED"
+        attempt.http_status = exc.status_code
+        attempt.response_payload = exc.payload
+        attempt.retryable = retry
+        item.last_error = error
+        draft.last_error = error
+        item.status = JobItemStatus.FAILED if not retry else JobItemStatus.RUNNING
+        draft.status = DraftStatus.FAILED if not retry else DraftStatus.PUBLISHING
+        db.commit()
+        logger.error(
+            "publication_description_failed draft=%s item_id=%s http_status=%s retryable=%s",
+            draft.id,
+            publication.item_id,
+            exc.status_code,
+            retry,
+        )
+        return False, retry
+
+
+def _quantity_price_sync_status(publication: Publication) -> str:
+    response = publication.external_response or {}
+    sync = response.get("_quantity_price_sync") or {}
+    return str(sync.get("status") or "").upper()
+
+
+def _set_quantity_price_sync(publication: Publication, *, status: str, detail: dict | None = None) -> None:
+    response = dict(publication.external_response or {})
+    response["_quantity_price_sync"] = {"status": status, **(detail or {})}
+    publication.external_response = response
+
+
+def _sync_quantity_prices(
+    db, *, client: MercadoLibreClient, publication: Publication, version: ProductVersion, draft: PublicationDraft
+) -> dict | None:
+    tiers = normalize_b2b_quantity_prices(version.commercial, base_price=version.price)
+    if not tiers:
+        _set_quantity_price_sync(publication, status="NOT_REQUESTED")
+        db.commit()
+        return None
+    if _quantity_price_sync_status(publication) == "SYNCED":
+        return None
+
+    try:
+        result = sync_b2b_quantity_prices(
+            client,
+            item_id=publication.item_id,
+            tiers=tiers,
+            currency_id=version.currency_id,
+        )
+        _set_quantity_price_sync(
+            publication,
+            status="SYNCED",
+            detail={
+                "http_status": result["http_status"],
+                "tiers": [
+                    {"min_purchase_unit": row["min_purchase_unit"], "amount": float(row["amount"])}
+                    for row in tiers
+                ],
+            },
+        )
+        db.commit()
+        logger.info(
+            "publication_quantity_prices_succeeded draft=%s item_id=%s tiers=%d",
+            draft.id, publication.item_id, len(tiers),
+        )
+        return None
+    except MercadoLibreError as exc:
+        error = build_mercadolibre_error(exc, retryable=False)
+        error["code"] = "QUANTITY_PRICE_SYNC_FAILED"
+        _set_quantity_price_sync(
+            publication,
+            status="FAILED",
+            detail={"http_status": exc.status_code, "error": error},
+        )
+        db.commit()
+        logger.warning(
+            "publication_quantity_prices_failed draft=%s item_id=%s http_status=%s message=%s",
+            draft.id, publication.item_id, exc.status_code, error.get("message"),
+        )
+        return error
+
+
+def _fail_without_retry(db, *, item, draft, attempt, outcome: str, code: str, message: str):
+    attempt.outcome = outcome
+    item.status = JobItemStatus.FAILED
+    error = {"code": code, "message": message}
+    item.last_error = error
+    draft.last_error = error
+    draft.status = DraftStatus.FAILED
+    db.commit()
+    logger.error(
+        "publication_item_failed draft=%s sequence=%s code=%s message=%s",
+        draft.id,
+        draft.sequence_number,
+        code,
+        message,
+    )
+    return False, False
+
+
+def process_item_once(item_id: uuid.UUID) -> tuple[bool, bool]:
+    """Return (success, should_retry).
+
+    Network timeout after sending a publication is intentionally NOT retried:
+    the external state is ambiguous and must be reconciled first.
+    """
+    with SessionLocal() as db:
+        item = db.get(JobItem, item_id)
+        draft = db.get(PublicationDraft, item.draft_id)
+        batch = db.get(DraftBatch, draft.batch_id)
+        version = db.get(ProductVersion, batch.product_version_id)
+
+        existing_publication = _existing_confirmed_publication(db, draft.id)
+        if existing_publication:
+            item.status = JobItemStatus.RUNNING
+            item.attempts += 1
+            draft.status = DraftStatus.PUBLISHING
+            attempt = PublicationAttempt(
+                draft_id=draft.id,
+                attempt_number=item.attempts,
+                request_payload={"resume_publication_id": existing_publication.item_id},
+                outcome="POST_PUBLICATION_RESUME_STARTED",
+            )
+            db.add(attempt)
+            db.flush()
+            token = load_access_token(db, batch.account_id)
+            client = MercadoLibreClient(token)
+
+            description_ok, description_retry = _sync_description(
+                db, client=client, publication=existing_publication, version=version,
+                item=item, draft=draft, attempt=attempt
+            )
+            if not description_ok:
+                return False, description_retry
+
+            quantity_warning = _sync_quantity_prices(
+                db, client=client, publication=existing_publication, version=version, draft=draft
+            )
+            attempt.outcome = "SUCCEEDED_WITH_WARNING" if quantity_warning else "SUCCEEDED"
+            item.status = JobItemStatus.SUCCEEDED
+            draft.status = DraftStatus.PUBLISHED
+            draft.last_error = None
+            item.last_error = quantity_warning
+            db.commit()
+            logger.info("publication_item_already_confirmed draft=%s", draft.id)
+            return True, False
+
+        item.status = JobItemStatus.RUNNING
+        item.attempts += 1
+        draft.status = DraftStatus.PUBLISHING
+        db.commit()
+        logger.info(
+            "publication_item_started job_item=%s draft=%s sequence=%d attempt=%d category=%s",
+            item.id,
+            draft.id,
+            draft.sequence_number,
+            item.attempts,
+            version.category_id,
+        )
+
+        image_urls = image_urls_for_worker(version, draft)
+        payload = build_item_payload(
+            version,
+            draft,
+            image_urls,
+            seller_sku=version.master.internal_sku,
+        )
+        attempt = PublicationAttempt(
+            draft_id=draft.id,
+            attempt_number=item.attempts,
+            request_payload=payload,
+            outcome="STARTED",
+        )
+        db.add(attempt)
+        db.flush()
+
+        if not settings.ml_live_publication_enabled:
+            return _fail_without_retry(
+                db,
+                item=item,
+                draft=draft,
+                attempt=attempt,
+                outcome="BLOCKED_BY_FEATURE_FLAG",
+                code="LIVE_PUBLICATION_DISABLED",
+                message="Live publication is disabled by configuration.",
+            )
+
+        if not image_urls:
+            return _fail_without_retry(
+                db,
+                item=item,
+                draft=draft,
+                attempt=attempt,
+                outcome="MISSING_PUBLIC_IMAGE_URLS",
+                code="PUBLIC_IMAGE_URL_REQUIRED",
+                message=(
+                    "La publicación live necesita una URL HTTPS pública para las imágenes. "
+                    "Configurá APP_PUBLIC_BASE_URL o una ML_REDIRECT_URI pública válida."
+                ),
+            )
+
+        token = load_access_token(db, batch.account_id)
+        client = MercadoLibreClient(token)
+
+        # Persist a durable checkpoint before the external side effect. The SSE endpoint
+        # can now report that this draft is actively being sent to Mercado Libre.
+        db.commit()
+        logger.info(
+            "publication_request_started draft=%s sequence=%d images=%d payload_fields=%s commercial_intent=%s",
+            draft.id,
+            draft.sequence_number,
+            len(image_urls),
+            sorted(payload.keys()),
+            (draft.commercial_config or {}).get("commercial_intent"),
+        )
+
+        try:
+            response = client.create_item(payload)
+            attempt = db.get(PublicationAttempt, attempt.id)
+            item = db.get(JobItem, item.id)
+            draft = db.get(PublicationDraft, draft.id)
+            attempt.http_status = response.status_code
+            attempt.response_payload = response.payload
+            attempt.outcome = "SUCCEEDED"
+
+            publication = Publication(
+                draft_id=draft.id,
+                account_id=batch.account_id,
+                status=DraftStatus.PUBLISHED,
+                item_id=response.payload.get("id"),
+                user_product_id=response.payload.get("user_product_id"),
+                external_response=response.payload,
+                published_at=utcnow(),
+            )
+            _set_description_sync(
+                publication,
+                status="PENDING" if (version.description or "").strip() else "NOT_REQUESTED",
+            )
+            db.add(publication)
+            db.commit()
+
+            description_ok, description_retry = _sync_description(
+                db, client=client, publication=publication, version=version,
+                item=item, draft=draft, attempt=attempt
+            )
+            if not description_ok:
+                return False, description_retry
+
+            quantity_warning = _sync_quantity_prices(
+                db, client=client, publication=publication, version=version, draft=draft
+            )
+            draft.status = DraftStatus.PUBLISHED
+            draft.last_error = None
+            item.status = JobItemStatus.SUCCEEDED
+            item.last_error = quantity_warning
+            db.commit()
+            returned_title = str(response.payload.get("title") or "").strip()
+            intended_title = publication_title_intent(draft)
+            logger.info(
+                "publication_request_succeeded draft=%s sequence=%d http_status=%s item_id=%s "
+                "user_product_id=%s returned_title_matches_intent=%s returned_title=%s",
+                draft.id,
+                draft.sequence_number,
+                response.status_code,
+                response.payload.get("id"),
+                response.payload.get("user_product_id"),
+                bool(returned_title and returned_title.casefold() == intended_title.casefold()),
+                returned_title or None,
+            )
+            return True, False
+
+        except MercadoLibreError as exc:
+            attempt = db.get(PublicationAttempt, attempt.id)
+            item = db.get(JobItem, item.id)
+            draft = db.get(PublicationDraft, draft.id)
+            attempt.http_status = exc.status_code
+            attempt.response_payload = exc.payload
+            attempt.retryable = exc.retryable
+
+            ambiguous = exc.status_code is None
+            if ambiguous:
+                attempt.outcome = "UNKNOWN_EXTERNAL_STATE"
+                draft.status = DraftStatus.UNKNOWN_EXTERNAL_STATE
+                item.status = JobItemStatus.UNKNOWN
+                retry = False
+            else:
+                attempt.outcome = "FAILED"
+                draft.status = DraftStatus.FAILED
+                item.status = JobItemStatus.FAILED
+                retry = exc.retryable and item.attempts < settings.worker_max_attempts
+
+            error = build_mercadolibre_error(exc, retryable=retry)
+            draft.last_error = error
+            item.last_error = error
+            db.commit()
+
+            causes = error.get("causes") or []
+            logger.error(
+                "publication_request_failed draft=%s sequence=%d http_status=%s retryable=%s ambiguous=%s "
+                "api_error=%s api_message=%s cause_count=%d",
+                draft.id,
+                draft.sequence_number,
+                exc.status_code,
+                retry,
+                ambiguous,
+                error.get("provider_error"),
+                error.get("message"),
+                len(causes),
+            )
+            for index, cause in enumerate(causes, start=1):
+                logger.error(
+                    "publication_rejection_cause draft=%s sequence=%d cause=%d code=%s field=%s type=%s message=%s",
+                    draft.id,
+                    draft.sequence_number,
+                    index,
+                    cause.get("code"),
+                    cause.get("field"),
+                    cause.get("type"),
+                    cause.get("message"),
+                )
+            return False, retry
+
+
+def process_item(item_id: uuid.UUID) -> bool:
+    while True:
+        success, retry = process_item_once(item_id)
+        if success:
+            return True
+        if not retry:
+            return False
+        with SessionLocal() as db:
+            item = db.get(JobItem, item_id)
+            attempt_no = item.attempts
+        delay = settings.worker_base_backoff_seconds * (2 ** max(0, attempt_no - 1))
+        logger.warning("publication_retry_scheduled job_item=%s delay_seconds=%.1f next_attempt=%d", item_id, delay, attempt_no + 1)
+        time.sleep(delay)
+
+
+def process_job(job_id: uuid.UUID, *, worker_instance_id: uuid.UUID):
+    with SessionLocal() as db:
+        item_ids = db.scalars(
+            select(JobItem.id)
+            .where(JobItem.job_id == job_id, JobItem.status == JobItemStatus.PENDING)
+            .order_by(JobItem.id)
+        ).all()
+
+    for item_id in item_ids:
+        with SessionLocal() as db:
+            heartbeat_worker(db, instance_id=worker_instance_id)
+        ok = process_item(item_id)
+        with SessionLocal() as db:
+            heartbeat_worker(db, instance_id=worker_instance_id)
+            job = db.get(Job, job_id)
+            job.processed += 1
+            if ok:
+                job.succeeded += 1
+            else:
+                job.failed += 1
+            db.commit()
+            logger.info(
+                "publication_job_progress job=%s processed=%d total=%d succeeded=%d failed=%d",
+                job.id,
+                job.processed,
+                job.total,
+                job.succeeded,
+                job.failed,
+            )
+
+    with SessionLocal() as db:
+        job = db.get(Job, job_id)
+        job.finished_at = utcnow()
+        if job.failed == 0:
+            job.status = JobStatus.COMPLETED
+        elif job.succeeded > 0:
+            job.status = JobStatus.PARTIAL
+        else:
+            job.status = JobStatus.FAILED
+        db.commit()
+        logger.info(
+            "publication_job_finished job=%s status=%s succeeded=%d failed=%d",
+            job.id,
+            job.status,
+            job.succeeded,
+            job.failed,
+        )
+
+
+def run():
+    instance_id = uuid.uuid4()
+    with SessionLocal() as db:
+        register_worker(db, instance_id=instance_id)
+    logger.info(
+        "publication_worker_started instance=%s poll_seconds=%.1f live_enabled=%s public_base_configured=%s",
+        instance_id,
+        settings.worker_poll_seconds,
+        settings.ml_live_publication_enabled,
+        bool(settings.public_base_url),
+    )
+    try:
+        while True:
+            with SessionLocal() as db:
+                heartbeat_worker(db, instance_id=instance_id)
+            job_id = claim_job()
+            if job_id:
+                process_job(job_id, worker_instance_id=instance_id)
+            else:
+                time.sleep(settings.worker_poll_seconds)
+    finally:
+        try:
+            with SessionLocal() as db:
+                unregister_worker(db, instance_id=instance_id)
+        except Exception:
+            logger.exception("publication_worker_unregister_failed instance=%s", instance_id)
+
+
+if __name__ == "__main__":
+    run()
