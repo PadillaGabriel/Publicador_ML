@@ -1,0 +1,12 @@
+{
+  "mode": "me2",
+  "methods": [],
+  "tags": [
+    "self_service_in"
+  ],
+  "dimensions": null,
+  "local_pick_up": true,
+  "free_shipping": false,
+  "logistic_type": "cross_docking",
+  "store_pick_up": false
+}

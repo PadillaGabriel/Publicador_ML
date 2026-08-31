@@ -1,0 +1,21 @@
+{
+  "currency_id": "ARS",
+  "free_relist": false,
+  "listing_exposure": "highest",
+  "listing_fee_amount": 0,
+  "listing_fee_details": {
+    "fixed_fee": 0,
+    "gross_amount": 0
+  },
+  "listing_type_id": "gold_special",
+  "requires_picture": true,
+  "sale_fee_amount": 5940,
+  "sale_fee_details": {
+    "financing_add_on_fee": 0,
+    "fixed_fee": 2740,
+    "gross_amount": 5940,
+    "meli_percentage_fee": 16,
+    "percentage_fee": 16
+  },
+  "stop_time": "2046-08-27T00:00:00.000-04:00"
+}
