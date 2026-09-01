@@ -1,36 +1,13 @@
-import uuid
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
 
 from app.persistence import PricingCostComponent, PricingProfile
+from app.pricing import service
 from app.pricing.application import resolve_effective_economic_parameters
 from app.pricing.schemas import PricingProfileUpsert
-from app.pricing.service import upsert_default_profile
-
-
-class _ProfileSession:
-    def __init__(self, profile: PricingProfile):
-        self.profile = profile
-        self.added = []
-
-    def scalar(self, statement):
-        return self.profile
-
-    def add(self, entity):
-        self.added.append(entity)
-
-    def execute(self, statement):
-        return None
-
-    def flush(self):
-        return None
-
-    def commit(self):
-        return None
-
-    def refresh(self, entity):
-        return None
 
 
 def test_profile_upsert_preserves_explicit_economic_percentages():
@@ -52,9 +29,12 @@ def test_profile_upsert_preserves_explicit_economic_percentages():
     assert payload.minimum_margin_pct == Decimal("10")
 
 
-def test_upsert_default_profile_persists_every_explicit_economic_rate():
-    """Catches dropping configured rate fields while the default profile is saved."""
-    profile = PricingProfile(id=uuid.uuid4(), channel="MERCADOLIBRE", is_default=True)
+def test_upsert_default_profile_persists_every_explicit_economic_rate(monkeypatch):
+    """Catches lost economic rates after a real commit and independent re-query."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    PricingProfile.__table__.create(engine)
+    PricingCostComponent.__table__.create(engine)
+    monkeypatch.setattr(service, "audit", lambda *args, **kwargs: None)
     payload = PricingProfileUpsert(
         vat_rate_pct=Decimal("21"),
         iibb_rate_pct=Decimal("3"),
@@ -62,12 +42,19 @@ def test_upsert_default_profile_persists_every_explicit_economic_rate():
         refund_rate_pct=Decimal("1"),
     )
 
-    saved = upsert_default_profile(_ProfileSession(profile), payload)
+    with Session(engine) as db:
+        saved = service.upsert_default_profile(db, payload)
+        profile_id = saved.id
+        db.expunge_all()
 
-    assert saved.vat_rate_pct == Decimal("21")
-    assert saved.iibb_rate_pct == Decimal("3")
-    assert saved.ads_rate_pct == Decimal("5")
-    assert saved.refund_rate_pct == Decimal("1")
+    with Session(engine) as db:
+        persisted = db.scalar(select(PricingProfile).where(PricingProfile.id == profile_id))
+
+    assert persisted is not None
+    assert persisted.vat_rate_pct == Decimal("21")
+    assert persisted.iibb_rate_pct == Decimal("3")
+    assert persisted.ads_rate_pct == Decimal("5")
+    assert persisted.refund_rate_pct == Decimal("1")
 
 
 def test_simulation_override_is_resolved_without_mutating_global_profile():
