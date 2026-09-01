@@ -31,6 +31,10 @@ def serialize_profile(profile: PricingProfile) -> dict:
         "currency_id": profile.currency_id,
         "target_margin_pct": float(profile.target_margin_pct),
         "minimum_margin_pct": float(profile.minimum_margin_pct),
+        "vat_rate_pct": float(profile.vat_rate_pct),
+        "iibb_rate_pct": float(profile.iibb_rate_pct),
+        "ads_rate_pct": float(profile.ads_rate_pct),
+        "refund_rate_pct": float(profile.refund_rate_pct),
         "monthly_units_projection": profile.monthly_units_projection,
         "rounding_step": float(profile.rounding_step),
         "is_default": profile.is_default,
@@ -40,6 +44,7 @@ def serialize_profile(profile: PricingProfile) -> dict:
                 "name": component.name,
                 "kind": component.kind,
                 "value": float(component.value),
+                "basis": component.basis,
                 "active": component.active,
             }
             for component in sorted(profile.components, key=lambda item: (item.sort_order, item.name))
@@ -60,6 +65,10 @@ def upsert_default_profile(db: Session, payload: PricingProfileUpsert) -> Pricin
     profile.currency_id = payload.currency_id.strip().upper()
     profile.target_margin_pct = payload.target_margin_pct
     profile.minimum_margin_pct = payload.minimum_margin_pct
+    profile.vat_rate_pct = payload.vat_rate_pct
+    profile.iibb_rate_pct = payload.iibb_rate_pct
+    profile.ads_rate_pct = payload.ads_rate_pct
+    profile.refund_rate_pct = payload.refund_rate_pct
     profile.monthly_units_projection = payload.monthly_units_projection
     profile.rounding_step = payload.rounding_step
     profile.updated_at = utcnow()
@@ -72,6 +81,7 @@ def upsert_default_profile(db: Session, payload: PricingProfileUpsert) -> Pricin
             name=component.name.strip(),
             kind=component.kind,
             value=component.value,
+            basis=component.basis,
             active=component.active,
             sort_order=index,
         ))
