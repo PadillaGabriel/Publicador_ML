@@ -58,8 +58,15 @@ def test_item_rejects_a_non_mapping_response(
 
 
 def test_item_returns_the_item_mapping(client: MercadoLibreClient, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Catches dropping fields from the item-detail response."""
+    """Catches using an item-detail path other than the requested item ID."""
     response = {"id": "MLA123", "price": 20000}
-    monkeypatch.setattr(client, "get", lambda _path: response)
+    request_paths: list[str] = []
+
+    def fake_get(path: str) -> dict:
+        request_paths.append(path)
+        return response
+
+    monkeypatch.setattr(client, "get", fake_get)
 
     assert client.item("MLA123") == response
+    assert request_paths == ["/items/MLA123"]
