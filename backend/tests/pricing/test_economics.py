@@ -83,6 +83,23 @@ def test_economics_exposes_each_fee_and_contribution_component():
     assert result.contribution_margin_pct == Decimal("18.00")
 
 
+@pytest.mark.parametrize("meli_percentage_fee", [Decimal(15), Decimal(17)])
+def test_economics_rejects_ambiguous_marketplace_percentage_fees(meli_percentage_fee: Decimal):
+    """Catches silently choosing a fee when Mercado Libre fields disagree."""
+    marketplace = MarketplaceEconomics(
+        percentage_fee=Decimal(16),
+        meli_percentage_fee=meli_percentage_fee,
+        financing_add_on_fee=Decimal(2),
+        fixed_fee=Decimal(0),
+        shipping_cost=Decimal(0),
+        shipping_subsidy=Decimal(0),
+        buyer_shipping_amount=Decimal(0),
+    )
+
+    with pytest.raises(PricingDomainError, match="TARIFA_ML_INCONSISTENTE"):
+        evaluate_economics(_inputs(), marketplace)
+
+
 def test_missing_cmv_raises_an_explicit_domain_error():
     """Catches silently treating absent CMV as a known zero cost."""
     with pytest.raises(PricingDomainError, match="SIN_CMV"):

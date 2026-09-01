@@ -57,6 +57,11 @@ def evaluate_economics(
         code="SIN_TARIFA_ML",
         name="Mercado Libre percentage fee",
     )
+    if meli_percentage_fee != percentage_fee:
+        raise PricingDomainError(
+            "TARIFA_ML_INCONSISTENTE",
+            "Marketplace percentage fee fields disagree.",
+        )
     financing_add_on_fee = _required_decimal(
         marketplace.financing_add_on_fee,
         code="SIN_TARIFA_ML",
