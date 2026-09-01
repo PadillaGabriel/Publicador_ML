@@ -1,9 +1,38 @@
+import json
 from decimal import Decimal
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
 from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
+from app.pricing.domain.errors import PricingDomainError
+from app.pricing.infrastructure import mercadolibre
+
+FIXTURES_DIR = Path(__file__).parents[1] / "fixtures" / "ml"
+
+
+class ListingPricesFixtureClient:
+    def __init__(self, response: object) -> None:
+        self.response = response
+
+    def listing_prices(self, **_context: object) -> object:
+        return self.response
+
+
+def load_fixture(name: str) -> dict[str, object]:
+    return json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
+
+
+def simulation_context(listing_type_id: str = "gold_special") -> object:
+    return mercadolibre.MarketplaceSimulationContext(
+        site_id="MLA",
+        category_id="MLA412517",
+        listing_type_id=listing_type_id,
+        currency_id="ARS",
+        logistic_type="cross_docking",
+        shipping_mode="me2",
+    )
 
 
 @pytest.fixture
@@ -70,3 +99,59 @@ def test_item_returns_the_item_mapping(client: MercadoLibreClient, monkeypatch: 
 
     assert client.item("MLA123") == response
     assert request_paths == ["/items/MLA123"]
+
+
+def test_provider_maps_listing_fee_details_without_losing_components() -> None:
+    """Catches collapsing independently reported Mercado Libre fee components."""
+    provider = mercadolibre.MercadoLibrePricingProvider(
+        ListingPricesFixtureClient(load_fixture("listing_prices.json"))
+    )
+
+    result = provider.parse_listing_prices(load_fixture("listing_prices.json"), "gold_special")
+
+    assert result.percentage_fee == Decimal(16)
+    assert result.meli_percentage_fee == Decimal(16)
+    assert result.financing_add_on_fee == Decimal(0)
+    assert result.fixed_fee == Decimal(2740)
+
+
+@pytest.mark.parametrize(
+    "missing_field",
+    ("percentage_fee", "meli_percentage_fee", "financing_add_on_fee", "fixed_fee"),
+)
+def test_provider_rejects_a_missing_listing_fee_component(missing_field: str) -> None:
+    """Catches treating a contractually absent Mercado Libre fee as an economic zero."""
+    response = load_fixture("listing_prices.json")
+    details = response["sale_fee_details"]
+    assert isinstance(details, dict)
+    details.pop(missing_field)
+    provider = mercadolibre.MercadoLibrePricingProvider(ListingPricesFixtureClient(response))
+
+    with pytest.raises(PricingDomainError) as exc:
+        provider.parse_listing_prices(response, "gold_special")
+
+    assert exc.value.code == "SIN_TARIFA_ML"
+
+
+def test_provider_raises_sin_tarifa_ml_when_response_has_no_matching_listing_type() -> None:
+    """Catches accepting a tariff response for a listing type other than the simulated one."""
+    provider = mercadolibre.MercadoLibrePricingProvider(
+        ListingPricesFixtureClient(load_fixture("listing_prices.json"))
+    )
+
+    with pytest.raises(PricingDomainError) as exc:
+        provider.simulate(simulation_context("gold_pro"), Decimal("17745.05"))
+
+    assert exc.value.code == "SIN_TARIFA_ML"
+
+
+def test_provider_rejects_unavailable_prospective_logistics_without_zero_shipping_cost() -> None:
+    """Catches silently treating unavailable freight quotation data as free shipping."""
+    provider = mercadolibre.MercadoLibrePricingProvider(
+        ListingPricesFixtureClient(load_fixture("listing_prices.json"))
+    )
+
+    with pytest.raises(PricingDomainError) as exc:
+        provider.simulate(simulation_context(), Decimal("17745.05"))
+
+    assert exc.value.code == "SIN_CONTEXTO_LOGISTICO"
