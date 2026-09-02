@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from itertools import combinations
 
 from app.keywords.relevance import content_tokens, normalize_text
 
@@ -28,27 +29,31 @@ class TitleRecommendation:
     fallback_used: bool
 
 
-def _factual_phrases(context: ProductTitleContext) -> list[str]:
-    phrases = [context.product_name.strip()]
-    phrases.extend(str(value).strip() for _, value in sorted(context.attributes.items()))
-    return [phrase for phrase in phrases if phrase]
+def _factual_terms(context: ProductTitleContext) -> list[str]:
+    terms = context.product_name.strip().split()
+    terms.extend(
+        str(value).strip()
+        for _, value in sorted(context.attributes.items())
+        if str(value).strip()
+    )
+    return terms
 
 
 def _word_keys(word: str) -> list[str]:
     return content_tokens(word) or [token for token in (normalize_text(word),) if token]
 
 
-def _deduplicated_title(phrases: list[str], max_length: int) -> str:
+def _complete_title(terms: list[str], max_length: int) -> str | None:
     seen: set[str] = set()
     words: list[str] = []
-    for phrase in phrases:
-        for word in phrase.split():
+    for term in terms:
+        for word in term.split():
             keys = _word_keys(word)
             if not keys or any(key in seen for key in keys):
                 continue
             title = " ".join([*words, word.upper()])
             if len(title) > max_length:
-                return " ".join(words)
+                return None
             seen.update(keys)
             words.append(word.upper())
     return " ".join(words)
@@ -78,25 +83,42 @@ def _compact_capacity(value: str) -> str:
     return re.sub(r"(?<=\d)\s+(?=[A-Za-z])", "", value)
 
 
-def _trend_candidates(context: ProductTitleContext, max_length: int) -> tuple[str, ...]:
+def _trend_candidate(context: ProductTitleContext, max_length: int) -> str | None:
     name_words = context.product_name.strip().split()
     if not name_words:
-        return ()
-    descriptor = name_words[-1:]
+        return None
     use = _attribute_value(context, {"use", "uso"})
+    if not use:
+        return None
     capacity = _compact_capacity(_attribute_value(context, {"capacity", "capacidad"}))
-    use_words = use.split()
-    variants = (
-        [name_words[0], *descriptor, "PARA", *use_words, capacity],
-        [name_words[0], *descriptor, capacity, "PARA", *use_words],
-        [name_words[0], "PARA", *use_words, *descriptor, capacity],
-        [name_words[0], *descriptor, *use_words, capacity],
-    )
+    terms = [name_words[0], name_words[-1], "PARA", use]
+    if capacity:
+        terms.append(capacity)
+    return _complete_title(terms, max_length)
+
+
+def _arrangements(terms: list[str]) -> tuple[tuple[str, ...], ...]:
+    if len(terms) < 2:
+        return (tuple(terms),)
+    arrangements = [tuple(terms)]
+    arrangements.extend(tuple(terms[offset:] + terms[:offset]) for offset in range(1, len(terms)))
+    arrangements.append(tuple(reversed(terms)))
+    return tuple(dict.fromkeys(arrangements))
+
+
+def _factual_candidates(terms: list[str], max_length: int) -> tuple[str, ...]:
     candidates: list[str] = []
-    for words in variants:
-        candidate = _deduplicated_title([word for word in words if word], max_length)
-        if candidate and candidate not in candidates:
-            candidates.append(candidate)
+    for size in range(len(terms), 0, -1):
+        for indexes in combinations(range(len(terms)), size):
+            subset = [terms[index] for index in indexes]
+            for arrangement in _arrangements(subset):
+                candidate = _complete_title(list(arrangement), max_length)
+                if candidate and candidate not in candidates:
+                    candidates.append(candidate)
+                    if len(candidates) == 10:
+                        return tuple(candidates)
+        if candidates:
+            return tuple(candidates)
     return tuple(candidates)
 
 
@@ -107,16 +129,19 @@ def recommend_title(
 ) -> TitleRecommendation:
     if not context.category_id.strip() or not context.product_name.strip():
         raise ValueError("category_id and product_name are required")
-    factual = _factual_phrases(context)
-    factual_tokens = {token for phrase in factual for token in content_tokens(phrase)}
+    factual_terms = _factual_terms(context)
+    factual_tokens = {token for term in factual_terms for token in content_tokens(term)}
     matched_trends = _matched_trends(trends, factual_tokens)
-    candidates = _trend_candidates(context, constraints.max_length) if matched_trends else ()
+    preferred = _trend_candidate(context, constraints.max_length) if matched_trends else None
+    candidates = list(_factual_candidates(factual_terms, constraints.max_length))
+    if preferred:
+        candidates.insert(0, preferred)
+    candidates = list(dict.fromkeys(candidates))[:10]
     if not candidates:
-        candidates = (_deduplicated_title(factual, constraints.max_length),)
-    candidates = tuple(candidate for candidate in candidates if candidate)
+        raise ValueError("no factual token fits max_length")
     return TitleRecommendation(
         recommended_title=candidates[0],
-        alternatives=candidates[1:10],
+        alternatives=tuple(candidates[1:]),
         matched_trends=matched_trends,
-        fallback_used=not bool(matched_trends),
+        fallback_used=preferred is None,
     )

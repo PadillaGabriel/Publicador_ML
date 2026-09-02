@@ -16,7 +16,9 @@ def test_recommendation_never_adds_an_incompatible_trend_token():
 
     result = recommend_title(context, ("cesto rattan",), TitleConstraints(max_length=60))
 
-    assert "RATTAN" not in result.recommended_title
+    candidates = (result.recommended_title, *result.alternatives)
+
+    assert all("RATTAN" not in candidate for candidate in candidates)
     assert result.fallback_used is True
 
 
@@ -104,3 +106,63 @@ def test_recommendation_rejects_oversized_candidates_without_cutting_a_word():
 
     assert result.recommended_title == "CESTO"
     assert all(len(candidate) <= 7 for candidate in (result.recommended_title, *result.alternatives))
+
+
+def test_recommendation_rejects_the_whole_oversized_trend_title_without_a_dangling_connector():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Cesto plástico plegable",
+        attributes={"capacity": "40 L", "use": "ropa"},
+    )
+
+    result = recommend_title(context, ("cesto ropa sucia",), TitleConstraints(max_length=10))
+
+    candidates = (result.recommended_title, *result.alternatives)
+    assert all(len(candidate) <= 10 for candidate in candidates)
+    assert all("PARA" not in candidate for candidate in candidates)
+    assert result.fallback_used is True
+
+
+def test_recommendation_raises_when_no_complete_factual_token_fits_the_limit():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Cesto",
+        attributes={},
+    )
+
+    with pytest.raises(ValueError, match="no factual token fits"):
+        recommend_title(context, (), TitleConstraints(max_length=4))
+
+
+def test_recommendation_generates_complete_factual_candidates_under_a_short_limit():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Caja azul",
+        attributes={"size": "M"},
+    )
+
+    result = recommend_title(context, (), TitleConstraints(max_length=11))
+    candidates = (result.recommended_title, *result.alternatives)
+
+    assert 3 <= len(candidates) <= 10
+    assert all(len(candidate) <= 11 for candidate in candidates)
+    assert all(set(candidate.split()) == {"CAJA", "AZUL", "M"} for candidate in candidates)
+    assert result.fallback_used is True
+
+
+def test_recommendation_uses_generic_attributes_without_an_unsupported_connector():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Caja organizadora",
+        attributes={"color": "azul", "material": "tela"},
+    )
+
+    result = recommend_title(context, ("caja organizadora",), TitleConstraints(max_length=60))
+    candidates = (result.recommended_title, *result.alternatives)
+
+    assert 3 <= len(candidates) <= 10
+    assert all("PARA" not in candidate for candidate in candidates)
+    assert all(set(candidate.split()) <= {"CAJA", "ORGANIZADORA", "AZUL", "TELA"} for candidate in candidates)
+    assert any("AZUL" in candidate for candidate in candidates)
+    assert any("TELA" in candidate for candidate in candidates)
+    assert result.fallback_used is True
