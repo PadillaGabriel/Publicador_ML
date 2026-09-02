@@ -1,6 +1,8 @@
 import logging
 import time
+from dataclasses import dataclass
 from datetime import timedelta
+from typing import Literal
 
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
@@ -31,6 +33,13 @@ class KeywordResearchError(RuntimeError):
         self.retryable = retryable
 
 
+@dataclass(frozen=True, slots=True)
+class CategoryTrendLookup:
+    terms: tuple[str, ...]
+    snapshot: KeywordTrendSnapshot | None
+    cache_status: Literal["FRESH_HIT", "MISS_FETCHED", "STALE_FALLBACK", "UNAVAILABLE"]
+
+
 def _latest_trend_snapshot(db: Session, site_id: str, category_id: str) -> KeywordTrendSnapshot | None:
     return db.scalar(
         select(KeywordTrendSnapshot)
@@ -43,13 +52,13 @@ def _latest_trend_snapshot(db: Session, site_id: str, category_id: str) -> Keywo
     )
 
 
-def _category_trends(
+def get_category_trends(
     db: Session,
     *,
     site_id: str,
     category_id: str,
     access_token: str,
-) -> tuple[list[str], KeywordTrendSnapshot, str]:
+) -> CategoryTrendLookup:
     settings = get_settings()
     now = utcnow()
     latest = _latest_trend_snapshot(db, site_id, category_id)
@@ -60,7 +69,7 @@ def _category_trends(
             category_id,
             len(latest.terms),
         )
-        return list(latest.terms), latest, "FRESH_HIT"
+        return CategoryTrendLookup(tuple(latest.terms), latest, "FRESH_HIT")
 
     logger.info("keyword_trends_fetch_started site=%s category=%s", site_id, category_id)
     try:
@@ -73,12 +82,9 @@ def _category_trends(
                 category_id,
                 len(latest.terms),
             )
-            return list(latest.terms), latest, "STALE_FALLBACK"
-        raise KeywordResearchError(
-            "No se pudieron obtener las tendencias de Mercado Libre para esta categoría.",
-            code="ML_KEYWORD_TRENDS_UNAVAILABLE",
-            retryable=exc.retryable,
-        ) from exc
+            return CategoryTrendLookup(tuple(latest.terms), latest, "STALE_FALLBACK")
+        logger.warning("keyword_trends_unavailable site=%s category=%s error=%s", site_id, category_id, exc)
+        return CategoryTrendLookup((), None, "UNAVAILABLE")
 
     terms = terms[: settings.keyword_max_trends]
     snapshot = KeywordTrendSnapshot(
@@ -97,7 +103,7 @@ def _category_trends(
         category_id,
         len(terms),
     )
-    return terms, snapshot, "MISS_FETCHED"
+    return CategoryTrendLookup(tuple(terms), snapshot, "MISS_FETCHED")
 
 
 def _fallback_snapshot(
@@ -156,12 +162,21 @@ def build_ml_keyword_snapshot(
         version.id,
         version.category_id,
     )
-    trends, trend_snapshot, cache_status = _category_trends(
+    trend_lookup = get_category_trends(
         db,
         site_id=site_id,
         category_id=version.category_id,
         access_token=access_token,
     )
+    if trend_lookup.snapshot is None:
+        raise KeywordResearchError(
+            "No se pudieron obtener las tendencias de Mercado Libre para esta categoría.",
+            code="ML_KEYWORD_TRENDS_UNAVAILABLE",
+            retryable=True,
+        )
+    trends = list(trend_lookup.terms)
+    trend_snapshot = trend_lookup.snapshot
+    cache_status = trend_lookup.cache_status
     product_text, factual_tokens = build_product_evidence(
         product_name=version.title_reference,
         category_name=category_name,

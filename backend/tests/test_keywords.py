@@ -3,6 +3,31 @@ from app.keywords.relevance import (
     rank_trends,
     select_assessed_keywords,
 )
+from app.keywords.service import get_category_trends
+
+
+class _TrendDb:
+    def __init__(self):
+        self.added = []
+
+    def scalar(self, _query):
+        return None
+
+    def add(self, value):
+        self.added.append(value)
+
+    def flush(self):
+        pass
+
+
+def test_category_trends_exposes_a_stable_lookup_contract(monkeypatch):
+    monkeypatch.setattr("app.keywords.service.MercadoLibreClient.category_trends", lambda *_: ["cesto ropa"])
+
+    lookup = get_category_trends(_TrendDb(), site_id="MLA", category_id="MLA1", access_token="token")
+
+    assert lookup.terms == ("cesto ropa",)
+    assert lookup.cache_status == "MISS_FETCHED"
+    assert lookup.snapshot is not None
 
 
 def _product_evidence():
