@@ -1,4 +1,5 @@
 from decimal import Decimal
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -7,7 +8,80 @@ from sqlalchemy.orm import Session
 from app.persistence import PricingCostComponent, PricingProfile
 from app.pricing import service
 from app.pricing.application import resolve_effective_economic_parameters
+from app.pricing.domain.models import MarketplaceEconomics
+from app.pricing.infrastructure.cache import PricingCacheKey, PricingSimulationCache
 from app.pricing.schemas import PricingProfileUpsert
+
+
+class CountingMarketplaceProvider:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def simulate(self) -> MarketplaceEconomics:
+        self.calls += 1
+        return MarketplaceEconomics(
+            percentage_fee=Decimal(16),
+            meli_percentage_fee=Decimal(16),
+            financing_add_on_fee=Decimal(0),
+            fixed_fee=Decimal(2740),
+            shipping_cost=Decimal(1200),
+            shipping_subsidy=Decimal(0),
+            buyer_shipping_amount=Decimal(0),
+        )
+
+
+def simulation_key(*, account_id: UUID, gross_price: str = "20000") -> PricingCacheKey:
+    return PricingCacheKey(
+        account_id=account_id,
+        category_or_item_id="MLA412517",
+        listing_type_id="gold_special",
+        gross_price=Decimal(gross_price),
+        logistic_type="cross_docking",
+        shipping_mode="me2",
+        billable_weight=Decimal("0.45"),
+    )
+
+
+def cached_marketplace_economics(
+    cache: PricingSimulationCache,
+    key: PricingCacheKey,
+    provider: CountingMarketplaceProvider,
+) -> MarketplaceEconomics:
+    cached = cache.get(key)
+    if cached is not None:
+        return cached
+    economics = provider.simulate()
+    cache.put(key, economics)
+    return economics
+
+
+def test_identical_complete_simulation_context_reuses_marketplace_provider_result():
+    """Catches repeating a provider request for an identical simulation context."""
+    cache = PricingSimulationCache(max_entries=8, ttl_seconds=60)
+    provider = CountingMarketplaceProvider()
+    key = simulation_key(account_id=uuid4())
+
+    first = cached_marketplace_economics(cache, key, provider)
+    second = cached_marketplace_economics(cache, key, provider)
+
+    assert first == second
+    assert provider.calls == 1
+
+
+def test_simulation_context_with_a_different_price_does_not_reuse_marketplace_result():
+    """Catches a cache key that omits gross price and returns another price's economics."""
+    cache = PricingSimulationCache(max_entries=8, ttl_seconds=60)
+    provider = CountingMarketplaceProvider()
+    account_id = uuid4()
+
+    cached_marketplace_economics(
+        cache, simulation_key(account_id=account_id, gross_price="20000"), provider
+    )
+    cached_marketplace_economics(
+        cache, simulation_key(account_id=account_id, gross_price="25000"), provider
+    )
+
+    assert provider.calls == 2
 
 
 def test_profile_upsert_preserves_explicit_economic_percentages():
