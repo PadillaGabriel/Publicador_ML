@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 CostKind = Literal[
     "FIXED_MONTHLY",
@@ -103,3 +103,65 @@ class ExistingListingPricingRequest(BaseModel):
     gross_cmv: Decimal | None = Field(default=None, ge=0)
     target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     overrides: EconomicOverrides = Field(default_factory=EconomicOverrides)
+
+
+class EconomicResultResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    gross_price: Decimal
+    net_price: Decimal
+    vat_debit: Decimal
+    gross_cmv: Decimal
+    net_cmv: Decimal
+    cmv_vat_credit: Decimal
+    taxable_revenue: Decimal
+    percentage_fee: Decimal
+    meli_percentage_fee: Decimal
+    financing_add_on_fee: Decimal
+    ml_commission_net: Decimal
+    financing_net: Decimal
+    fixed_fee: Decimal
+    ml_fixed_fee_net: Decimal
+    shipping_cost: Decimal
+    shipping_subsidy: Decimal
+    buyer_shipping_amount: Decimal
+    net_logistic_cost: Decimal
+    iibb: Decimal
+    ads_expected: Decimal
+    refunds_expected: Decimal
+    additional_unit_cost_net: Decimal
+    contribution_margin: Decimal
+    contribution_margin_pct: Decimal
+
+
+class PriceTargetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    target_margin_pct: Decimal
+    gross_price: Decimal
+    achieved_margin_pct: Decimal
+    probes: int
+
+
+class PricingAuditResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    parameter_sources: dict[str, str]
+    overrides: dict[str, Decimal]
+    marketplace_context: dict[str, str | Decimal]
+    analyzed_price: Decimal
+    scenario_units: int
+
+
+class PricingCalculatorResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    scenario: Literal["NEW_PRODUCT", "EXISTING_LISTING"]
+    scenario_units: int
+    analyzed: EconomicResultResponse
+    mc0: PriceTargetResponse
+    mc15: PriceTargetResponse
+    mc20: PriceTargetResponse
+    custom: PriceTargetResponse | None
+    recommended_price: Decimal
+    audit: PricingAuditResponse
