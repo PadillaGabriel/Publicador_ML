@@ -1,6 +1,9 @@
 import React, {useEffect, useMemo, useState} from "react";
 import {createRoot} from "react-dom/client";
 import {api, downloadFile, jobEvents} from "./api";
+import {PriceCalculator} from "./pricing/PriceCalculator";
+import {PricingProfileEditor} from "./pricing/PricingProfileEditor";
+import type {PricingProfile} from "./pricing/types";
 import "./styles.css";
 
 type Account = {
@@ -89,17 +92,6 @@ type ExistingProduct = {
 };
 
 type UploadedImage = {id: string; original_name: string; position: number; mime_type: string};
-type PricingCostComponent = {
-  id?: string;
-  name: string;
-  kind: "FIXED_MONTHLY" | "FIXED_PER_UNIT" | "FIXED_PER_ORDER" | "PERCENTAGE_OF_PRICE" | "PERCENTAGE_OF_COST";
-  value: number;
-  active: boolean;
-};
-type PricingProfileConfig = {
-  name: string; channel: string; currency_id: string; target_margin_pct: number; minimum_margin_pct: number;
-  monthly_units_projection: number | null; rounding_step: number; components: PricingCostComponent[];
-};
 type QuantityPriceTier = {min_purchase_unit: number; amount: number};
 type CommercialAllocation = CommercialOption & {count: number};
 const TERMINAL_JOB_STATES = ["COMPLETED", "PARTIAL", "FAILED", "CANCELLED"];
@@ -199,11 +191,12 @@ function App() {
   const [commercialAllocations, setCommercialAllocations] = useState<CommercialAllocation[]>([]);
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
-  const [activeView, setActiveView] = useState<"publisher" | "pricing">("publisher");
+  const [activeView, setActiveView] = useState<"publisher" | "pricing-settings" | "price-calculator">("publisher");
   const [pricingConfigured, setPricingConfigured] = useState(false);
-  const [pricingProfile, setPricingProfile] = useState<PricingProfileConfig>({
+  const [pricingProfile, setPricingProfile] = useState<PricingProfile>({
     name: "Mercado Libre", channel: "MERCADOLIBRE", currency_id: "ARS",
-    target_margin_pct: 20, minimum_margin_pct: 10, monthly_units_projection: null, rounding_step: 1, components: []
+    target_margin_pct: 20, minimum_margin_pct: 10, vat_rate_pct: 21, iibb_rate_pct: 0, ads_rate_pct: 0, refund_rate_pct: 0,
+    monthly_units_projection: null, rounding_step: 1, components: []
   });
   const [productCost, setProductCost] = useState("0");
   const [additionalUnitCost, setAdditionalUnitCost] = useState("0");
@@ -321,10 +314,14 @@ function App() {
             currency_id: result.profile.currency_id,
             target_margin_pct: Number(result.profile.target_margin_pct),
             minimum_margin_pct: Number(result.profile.minimum_margin_pct),
+            vat_rate_pct: Number(result.profile.vat_rate_pct),
+            iibb_rate_pct: Number(result.profile.iibb_rate_pct),
+            ads_rate_pct: Number(result.profile.ads_rate_pct),
+            refund_rate_pct: Number(result.profile.refund_rate_pct),
             monthly_units_projection: result.profile.monthly_units_projection,
             rounding_step: Number(result.profile.rounding_step),
             components: (result.profile.components || []).map((component:any) => ({
-              name: component.name, kind: component.kind, value: Number(component.value), active: Boolean(component.active)
+              name: component.name, kind: component.kind, value: Number(component.value), basis: component.basis, active: Boolean(component.active)
             })),
           });
         }
@@ -599,30 +596,14 @@ function App() {
     setPricingProfile({
       name: saved.name, channel: saved.channel, currency_id: saved.currency_id,
       target_margin_pct: Number(saved.target_margin_pct), minimum_margin_pct: Number(saved.minimum_margin_pct),
+      vat_rate_pct: Number(saved.vat_rate_pct), iibb_rate_pct: Number(saved.iibb_rate_pct),
+      ads_rate_pct: Number(saved.ads_rate_pct), refund_rate_pct: Number(saved.refund_rate_pct),
       monthly_units_projection: saved.monthly_units_projection, rounding_step: Number(saved.rounding_step),
       components: (saved.components || []).map((component:any) => ({
-        name: component.name, kind: component.kind, value: Number(component.value), active: Boolean(component.active)
+        name: component.name, kind: component.kind, value: Number(component.value), basis: component.basis, active: Boolean(component.active)
       })),
     });
     setMessage("Configuración económica guardada.");
-  }
-
-  function addPricingComponent() {
-    setPricingProfile(current => ({
-      ...current,
-      components: [...current.components, {name: "", kind: "PERCENTAGE_OF_PRICE", value: 0, active: true}],
-    }));
-  }
-
-  function updatePricingComponent(index: number, patch: Partial<PricingCostComponent>) {
-    setPricingProfile(current => ({
-      ...current,
-      components: current.components.map((component, position) => position === index ? {...component, ...patch} : component),
-    }));
-  }
-
-  function removePricingComponent(index: number) {
-    setPricingProfile(current => ({...current, components: current.components.filter((_, position) => position !== index)}));
   }
 
   async function simulateCurrentPrice() {
@@ -1105,9 +1086,10 @@ function App() {
       <aside>
         <div className="brand">Publicador ML</div>
         <div className="muted">Gestión masiva de publicaciones</div>
-        <div className="viewSwitch">
+        <div className="viewSwitch pricingViewSwitch">
           <button className={activeView === "publisher" ? "active" : ""} onClick={()=>setActiveView("publisher")}>Publicador</button>
-          <button className={activeView === "pricing" ? "active" : ""} onClick={()=>setActiveView("pricing")}>Configuración</button>
+          <button className={activeView === "pricing-settings" ? "active" : ""} onClick={()=>setActiveView("pricing-settings")}>Configuración</button>
+          <button className={activeView === "price-calculator" ? "active" : ""} onClick={()=>setActiveView("price-calculator")}>Calculadora</button>
         </div>
         <nav className="sideSteps">
           <div className={contextComplete ? "done" : "active"}><span>1</span> Producto y categoría</div>
@@ -1121,64 +1103,14 @@ function App() {
         </div>
       </aside>
 
-      <main style={{display: activeView === "pricing" ? undefined : "none"}}>
-        <header>
-          <div>
-            <h1>Costos y rentabilidad</h1>
-            <p>Configurá una estructura económica general para calcular pisos, contribución y precios objetivo sin hardcodear la realidad de una empresa.</p>
-          </div>
-        </header>
+      <main style={{display: activeView === "pricing-settings" ? undefined : "none"}}>
         {message && <div className="notice">{message}</div>}
-        <section className="card">
-          <div className="sectionTitle"><span>1</span> Perfil económico del canal</div>
-          <div className="grid3">
-            <label>Nombre del perfil<input value={pricingProfile.name} onChange={e=>setPricingProfile({...pricingProfile,name:e.target.value})}/></label>
-            <label>Margen objetivo %<input type="number" min="0" max="99" step="0.1" value={pricingProfile.target_margin_pct} onChange={e=>setPricingProfile({...pricingProfile,target_margin_pct:Number(e.target.value)})}/></label>
-            <label>Margen mínimo %<input type="number" min="0" max="99" step="0.1" value={pricingProfile.minimum_margin_pct} onChange={e=>setPricingProfile({...pricingProfile,minimum_margin_pct:Number(e.target.value)})}/></label>
-          </div>
-          <div className="grid3">
-            <label>Unidades proyectadas por mes<input type="number" min="1" value={pricingProfile.monthly_units_projection ?? ""} onChange={e=>setPricingProfile({...pricingProfile,monthly_units_projection:e.target.value ? Number(e.target.value) : null})}/><small>Se usa para distribuir costos FIXED_MONTHLY. Si queda vacío, esos costos se informan pero no se asignan por unidad.</small></label>
-            <label>Redondeo de precio sugerido<input type="number" min="0.01" step="0.01" value={pricingProfile.rounding_step} onChange={e=>setPricingProfile({...pricingProfile,rounding_step:Number(e.target.value)})}/><small>Ej.: 100 redondea siempre hacia arriba al siguiente múltiplo de $100.</small></label>
-            <label>Canal<input disabled value="Mercado Libre"/><small>El motor queda preparado para perfiles por canal sin mezclar lógica de publicación.</small></label>
-          </div>
-        </section>
+        <PricingProfileEditor profile={pricingProfile} busy={busy} onChange={setPricingProfile} onSave={() => run(savePricingProfile)} />
+      </main>
 
-        <section className="card">
-          <div className="toolbar pricingToolbar">
-            <div>
-              <div className="sectionTitle"><span>2</span> Variables de costo</div>
-              <p className="helper blockHelper">Cada variable define su base de cálculo. Los porcentajes sobre precio intervienen en la ecuación del precio objetivo; los costos fijos se mantienen separados del costo marginal.</p>
-            </div>
-            <button className="secondary" type="button" onClick={addPricingComponent}>+ Agregar variable</button>
-          </div>
-          {pricingProfile.components.length === 0 && <div className="optionalNotice">Todavía no configuraste variables. Podés agregar comisión, publicidad, impuestos, packaging, costos fijos u otros conceptos.</div>}
-          <div className="pricingComponents">
-            {pricingProfile.components.map((component,index)=><div className="pricingComponent" key={index}>
-              <label>Concepto<input value={component.name} onChange={e=>updatePricingComponent(index,{name:e.target.value})}/></label>
-              <label>Tipo<select value={component.kind} onChange={e=>updatePricingComponent(index,{kind:e.target.value as PricingCostComponent["kind"]})}>
-                <option value="PERCENTAGE_OF_PRICE">% sobre precio de venta</option>
-                <option value="PERCENTAGE_OF_COST">% sobre costo directo</option>
-                <option value="FIXED_PER_UNIT">Fijo por unidad</option>
-                <option value="FIXED_PER_ORDER">Fijo por pedido</option>
-                <option value="FIXED_MONTHLY">Fijo mensual</option>
-              </select></label>
-              <label>{component.kind.startsWith("PERCENTAGE") ? "Porcentaje %" : "Importe ARS"}<input type="number" min="0" step="0.01" value={component.value} onChange={e=>updatePricingComponent(index,{value:Number(e.target.value)})}/></label>
-              <label className="checkboxLabel pricingActive"><input type="checkbox" checked={component.active} onChange={e=>updatePricingComponent(index,{active:e.target.checked})}/> Activo</label>
-              <button className="tiny dangerButton" type="button" onClick={()=>removePricingComponent(index)}>Eliminar</button>
-            </div>)}
-          </div>
-          <button disabled={busy || !pricingProfile.name.trim()} onClick={()=>run(savePricingProfile)}>Guardar configuración económica</button>
-        </section>
-
-        <section className="card pricingMethod">
-          <div className="sectionTitle"><span>3</span> Criterio del motor</div>
-          <div className="pricingFormulaGrid">
-            <div><b>Costo marginal operativo</b><span>Costos incrementales de vender una unidad adicional. No absorbe automáticamente alquileres, sueldos u otros costos fijos mensuales.</span></div>
-            <div><b>Margen de contribución</b><span>Precio − costos variables. Es la contribución disponible para cubrir costos fijos y utilidad.</span></div>
-            <div><b>Precio de equilibrio</b><span>Precio mínimo matemático donde la contribución llega a cero bajo la estructura configurada.</span></div>
-            <div><b>Precio objetivo</b><span>Resuelve el precio necesario para alcanzar el margen objetivo configurado, considerando costos porcentuales sobre venta.</span></div>
-          </div>
-        </section>
+      <main style={{display: activeView === "price-calculator" ? undefined : "none"}}>
+        {message && <div className="notice">{message}</div>}
+        <PriceCalculator accountId={accountId} onUseRecommendedPrice={price => { setForm(previous => ({...previous, price: String(price)})); setActiveView("publisher"); setMessage("Precio recomendado transferido al formulario. Todavía no se creó ninguna publicación."); }} />
       </main>
 
       <main style={{display: activeView === "publisher" ? undefined : "none"}}>
@@ -1269,7 +1201,7 @@ function App() {
           <div className="economicSimulator">
             <div className="economicSimulatorHeader">
               <div><h3>Análisis económico</h3><p className="helper blockHelper">El motor recomienda; vos decidís el precio final. Usa la configuración general del canal y los costos directos de este producto.</p></div>
-              {!pricingConfigured && <button type="button" className="secondary" onClick={()=>setActiveView("pricing")}>Configurar costos</button>}
+              {!pricingConfigured && <button type="button" className="secondary" onClick={()=>setActiveView("pricing-settings")}>Configurar costos</button>}
             </div>
             <div className="grid3">
               <label>Costo del producto<input disabled={!contextComplete} type="number" min="0" step="0.01" value={productCost} onChange={e=>setProductCost(e.target.value)}/></label>
