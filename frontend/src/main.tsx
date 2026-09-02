@@ -3,7 +3,7 @@ import {createRoot} from "react-dom/client";
 import {api, downloadFile, jobEvents} from "./api";
 import {PriceCalculator} from "./pricing/PriceCalculator";
 import {PricingProfileEditor} from "./pricing/PricingProfileEditor";
-import type {PricingProfile} from "./pricing/types";
+import type {PricingCalculation, PricingProfile} from "./pricing/types";
 import "./styles.css";
 
 type Account = {
@@ -200,8 +200,10 @@ function App() {
   });
   const [productCost, setProductCost] = useState("0");
   const [additionalUnitCost, setAdditionalUnitCost] = useState("0");
-  const [unitsPerOrder, setUnitsPerOrder] = useState("1");
   const [pricingAnalysis, setPricingAnalysis] = useState<any>(null);
+  const [simulationPackage, setSimulationPackage] = useState({
+    dimensions: "", weight: "", logisticType: "", shippingMode: "",
+  });
   const [quantityPricingEnabled, setQuantityPricingEnabled] = useState(false);
   const [quantityPrices, setQuantityPrices] = useState<QuantityPriceTier[]>([]);
 
@@ -514,9 +516,6 @@ function App() {
     setQuantityPricingEnabled(savedQuantityPrices.length > 0);
     const savedPricing = version.commercial?.pricing_analysis || null;
     setPricingAnalysis(savedPricing);
-    if (savedPricing?.product_cost !== undefined) setProductCost(String(savedPricing.product_cost));
-    if (savedPricing?.additional_unit_cost !== undefined) setAdditionalUnitCost(String(savedPricing.additional_unit_cost));
-    if (savedPricing?.units_per_order !== undefined) setUnitsPerOrder(String(savedPricing.units_per_order));
 
     setCategoryId("");
     setSelectedCategoryName("");
@@ -608,19 +607,50 @@ function App() {
 
   async function simulateCurrentPrice() {
     if (!pricingConfigured) throw new Error("Configurá primero Costos y rentabilidad.");
+    const listingTypeId = commercialAllocations[0]?.listing_type_id;
+    if (!accountId || !categoryId || !listingTypeId) {
+      throw new Error("Elegí cuenta, categoría y una modalidad comercial antes de calcular.");
+    }
     const result = await api<any>("/api/pricing/simulate", {
       method: "POST",
       body: JSON.stringify({
+        account_id: accountId,
+        category_id: categoryId,
+        listing_type_id: listingTypeId,
         product_cost: Number(productCost),
+        sale_price: Number(form.price) > 0 ? Number(form.price) : null,
         additional_unit_costs: Number(additionalUnitCost) > 0
           ? [{name: "Otros costos directos del producto", amount: Number(additionalUnitCost)}]
           : [],
-        sale_price: Number(form.price) > 0 ? Number(form.price) : null,
-        units_per_order: Math.max(1, Number(unitsPerOrder) || 1),
-        channel: "MERCADOLIBRE",
+        package: {
+          dimensions: simulationPackage.dimensions || null,
+          weight: simulationPackage.weight ? Number(simulationPackage.weight) : null,
+          logistic_type: simulationPackage.logisticType || null,
+          shipping_mode: simulationPackage.shippingMode || null,
+        },
       }),
     });
-    setPricingAnalysis(result);
+    setPricingAnalysis({calculation_version: "pricing_v2_economic", ...result});
+  }
+
+  function transferRecommendedPrice(price: number, calculation: PricingCalculation) {
+    setForm(previous => ({...previous, price: String(price)}));
+    setPricingAnalysis({
+      calculation_version: "pricing_v2_economic",
+      scenario: calculation.scenario,
+      scenario_units: calculation.scenarioUnits,
+      recommended_price: price,
+      analyzed: {
+        net_cmv: calculation.analyzed.netCmv,
+        contribution_margin: calculation.analyzed.contributionMargin,
+        contribution_margin_pct: calculation.analyzed.contributionMarginPct,
+      },
+      mc0: {gross_price: calculation.mc0.grossPrice},
+      mc15: {gross_price: calculation.mc15.grossPrice},
+      mc20: {gross_price: calculation.mc20.grossPrice},
+    });
+    setActiveView("publisher");
+    setMessage("Precio recomendado transferido al formulario. Todavía no se creó ninguna publicación.");
   }
 
   function addQuantityPriceTier() {
@@ -661,19 +691,7 @@ function App() {
         min_purchase_unit: Number(tier.min_purchase_unit),
         amount: Number(tier.amount),
       })) : [],
-      pricing_analysis: pricingAnalysis ? {
-        calculation_version: pricingAnalysis.calculation_version,
-        profile_id: pricingAnalysis.profile_id,
-        product_cost: Number(productCost),
-        additional_unit_cost: Number(additionalUnitCost),
-        units_per_order: Number(unitsPerOrder),
-        break_even_price: pricingAnalysis.break_even_price,
-        minimum_price: pricingAnalysis.minimum_price,
-        target_price: pricingAnalysis.target_price,
-        recommended_price: pricingAnalysis.recommended_price,
-        target_margin_pct: pricingAnalysis.target_margin_pct,
-        minimum_margin_pct: pricingAnalysis.minimum_margin_pct,
-      } : null,
+      pricing_analysis: pricingAnalysis,
     };
   }
 
@@ -1110,7 +1128,7 @@ function App() {
 
       <main style={{display: activeView === "price-calculator" ? undefined : "none"}}>
         {message && <div className="notice">{message}</div>}
-        <PriceCalculator accountId={accountId} onUseRecommendedPrice={price => { setForm(previous => ({...previous, price: String(price)})); setActiveView("publisher"); setMessage("Precio recomendado transferido al formulario. Todavía no se creó ninguna publicación."); }} />
+        <PriceCalculator accountId={accountId} onUseRecommendedPrice={transferRecommendedPrice} />
       </main>
 
       <main style={{display: activeView === "publisher" ? undefined : "none"}}>
@@ -1200,25 +1218,30 @@ function App() {
           </div>
           <div className="economicSimulator">
             <div className="economicSimulatorHeader">
-              <div><h3>Análisis económico</h3><p className="helper blockHelper">El motor recomienda; vos decidís el precio final. Usa la configuración general del canal y los costos directos de este producto.</p></div>
+              <div><h3>Análisis económico</h3><p className="helper blockHelper">Usa la Calculadora de Precio con costos configurados y la tarifa/logística real de Mercado Libre.</p></div>
               {!pricingConfigured && <button type="button" className="secondary" onClick={()=>setActiveView("pricing-settings")}>Configurar costos</button>}
             </div>
             <div className="grid3">
               <label>Costo del producto<input disabled={!contextComplete} type="number" min="0" step="0.01" value={productCost} onChange={e=>setProductCost(e.target.value)}/></label>
-              <label>Otros costos directos / unidad<input disabled={!contextComplete} type="number" min="0" step="0.01" value={additionalUnitCost} onChange={e=>setAdditionalUnitCost(e.target.value)}/></label>
-              <label>Unidades promedio por pedido<input disabled={!contextComplete} type="number" min="1" step="1" value={unitsPerOrder} onChange={e=>setUnitsPerOrder(e.target.value)}/></label>
+              <label>Otros costos netos / unidad<input disabled={!contextComplete} type="number" min="0" step="0.01" value={additionalUnitCost} onChange={e=>setAdditionalUnitCost(e.target.value)}/></label>
+              <label>Modalidad ML<input disabled value={commercialAllocations[0]?.listing_type_name || "Pendiente de resolver"}/></label>
+            </div>
+            <div className="grid4">
+              <label>Dimensiones<input disabled={!contextComplete} value={simulationPackage.dimensions} onChange={e=>setSimulationPackage({...simulationPackage, dimensions:e.target.value})} placeholder="30x20x10"/></label>
+              <label>Peso<input disabled={!contextComplete} type="number" min="0" step="0.01" value={simulationPackage.weight} onChange={e=>setSimulationPackage({...simulationPackage, weight:e.target.value})}/></label>
+              <label>Tipo logístico<input disabled={!contextComplete} value={simulationPackage.logisticType} onChange={e=>setSimulationPackage({...simulationPackage, logisticType:e.target.value})} placeholder="drop_off"/></label>
+              <label>Modo de envío<input disabled={!contextComplete} value={simulationPackage.shippingMode} onChange={e=>setSimulationPackage({...simulationPackage, shippingMode:e.target.value})} placeholder="me2"/></label>
             </div>
             <button type="button" className="secondary" disabled={!contextComplete || !pricingConfigured || busy} onClick={()=>run(simulateCurrentPrice)}>Calcular rentabilidad</button>
             {pricingAnalysis && <div className="pricingResults">
-              <div><span>Costo marginal</span><b>{money(pricingAnalysis.marginal_unit_cost)}</b></div>
-              <div><span>Equilibrio</span><b>{money(pricingAnalysis.break_even_price)}</b></div>
-              <div><span>Piso margen mínimo</span><b>{money(pricingAnalysis.minimum_price)}</b></div>
-              <div><span>Precio objetivo</span><b>{money(pricingAnalysis.target_price)}</b></div>
+              <div><span>CMV neto</span><b>{money(pricingAnalysis.analyzed.net_cmv)}</b></div>
+              <div><span>MC 0%</span><b>{money(pricingAnalysis.mc0.gross_price)}</b></div>
+              <div><span>MC 15%</span><b>{money(pricingAnalysis.mc15.gross_price)}</b></div>
+              <div><span>MC 20%</span><b>{money(pricingAnalysis.mc20.gross_price)}</b></div>
               <div className="recommended"><span>Sugerido</span><b>{money(pricingAnalysis.recommended_price)}</b></div>
-              {pricingAnalysis.at_sale_price && <div className={`priceHealth ${String(pricingAnalysis.at_sale_price.health || "").toLowerCase()}`}><span>Margen contribución</span><b>{pricingAnalysis.at_sale_price.contribution_margin_pct}%</b><small>{money(pricingAnalysis.at_sale_price.contribution_amount)} · markup {pricingAnalysis.at_sale_price.markup_pct}%</small></div>}
+              <div className="priceHealth"><span>Margen analizado</span><b>{pricingAnalysis.analyzed.contribution_margin_pct}%</b><small>{money(pricingAnalysis.analyzed.contribution_margin)}</small></div>
               <button type="button" onClick={()=>setForm({...form,price:String(pricingAnalysis.recommended_price)})}>Usar precio sugerido</button>
             </div>}
-            {pricingAnalysis?.warnings?.length > 0 && <div className="pricingWarnings">{pricingAnalysis.warnings.map((warning:string,index:number)=><span key={index}>{warning}</span>)}</div>}
           </div>
 
           <div className="quantityPricingBox">
@@ -1229,7 +1252,7 @@ function App() {
                 {quantityPrices.map((tier,index)=><div className="quantityPriceRow" key={index}>
                   <label>Desde<input type="number" min="2" value={tier.min_purchase_unit} onChange={e=>updateQuantityPriceTier(index,{min_purchase_unit:Number(e.target.value)})}/></label>
                   <label>Precio unitario ARS<input type="number" min="0.01" step="0.01" value={tier.amount} onChange={e=>updateQuantityPriceTier(index,{amount:Number(e.target.value)})}/></label>
-                  {pricingAnalysis && <span className={Number(tier.amount) < Number(pricingAnalysis.minimum_price) ? "tierRisk bad" : "tierRisk ok"}>{Number(tier.amount) < Number(pricingAnalysis.minimum_price) ? "Debajo del piso configurado" : "Sobre el piso configurado"}</span>}
+                  {pricingAnalysis && <span className={Number(tier.amount) < Number(pricingAnalysis.mc0.gross_price) ? "tierRisk bad" : "tierRisk ok"}>{Number(tier.amount) < Number(pricingAnalysis.mc0.gross_price) ? "Debajo del piso MC 0%" : "Sobre el piso MC 0%"}</span>}
                   <button type="button" className="tiny dangerButton" onClick={()=>removeQuantityPriceTier(index)}>Eliminar</button>
                 </div>)}
               </div>

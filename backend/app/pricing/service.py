@@ -1,17 +1,10 @@
-from decimal import Decimal
-
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.audit.service import audit
 from app.core.time import utcnow
 from app.persistence import PricingCostComponent, PricingProfile
-from app.pricing.calculator import CostComponentValue, PricingInputs, calculate_pricing
-from app.pricing.schemas import PricingProfileUpsert, PricingSimulationRequest
-
-
-def _decimal(value) -> Decimal:
-    return value if isinstance(value, Decimal) else Decimal(str(value))
+from app.pricing.schemas import PricingProfileUpsert
 
 
 def get_default_profile(db: Session, channel: str = "MERCADOLIBRE") -> PricingProfile | None:
@@ -95,32 +88,3 @@ def upsert_default_profile(db: Session, payload: PricingProfileUpsert) -> Pricin
     db.commit()
     db.refresh(profile)
     return profile
-
-
-def simulate(db: Session, payload: PricingSimulationRequest) -> dict:
-    profile = get_default_profile(db, payload.channel.strip().upper())
-    if profile is None:
-        raise ValueError("Configurá primero el perfil de costos y rentabilidad del canal.")
-
-    components = tuple(
-        CostComponentValue(component.name, component.kind, _decimal(component.value))
-        for component in profile.components
-        if component.active
-    )
-    target = payload.target_margin_pct if payload.target_margin_pct is not None else _decimal(profile.target_margin_pct)
-    result = calculate_pricing(PricingInputs(
-        product_cost=payload.product_cost,
-        additional_unit_costs=tuple((item.name, item.amount) for item in payload.additional_unit_costs),
-        components=components,
-        monthly_units_projection=profile.monthly_units_projection,
-        units_per_order=payload.units_per_order,
-        target_margin_pct=target,
-        minimum_margin_pct=_decimal(profile.minimum_margin_pct),
-        rounding_step=_decimal(profile.rounding_step),
-        sale_price=payload.sale_price,
-    ))
-    result["profile_id"] = str(profile.id)
-    result["profile_name"] = profile.name
-    result["currency_id"] = profile.currency_id
-    result["calculation_version"] = "pricing_v1_contribution"
-    return result

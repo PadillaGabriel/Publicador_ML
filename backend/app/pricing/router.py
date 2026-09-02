@@ -19,7 +19,6 @@ from app.pricing.schemas import (
 from app.pricing.service import (
     get_default_profile,
     serialize_profile,
-    simulate,
     upsert_default_profile,
 )
 
@@ -57,12 +56,36 @@ def save_profile(payload: PricingProfileUpsert, db: Session = Depends(get_db)):
     return serialize_profile(upsert_default_profile(db, payload))
 
 
-@router.post("/simulate")
-def pricing_simulation(payload: PricingSimulationRequest, db: Session = Depends(get_db)):
+@router.post("/simulate", response_model=PricingCalculatorResponse)
+def pricing_simulation(
+    payload: PricingSimulationRequest, db: Session = Depends(get_db)
+) -> PricingCalculatorResponse:
     try:
-        return simulate(db, payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        service = build_calculator_service(db, payload.account_id)
+        calculation = service.calculate_new_product(
+            NewProductPricingRequest(
+                account_id=payload.account_id,
+                category_id=payload.category_id,
+                listing_type_id=payload.listing_type_id,
+                gross_cmv=payload.product_cost,
+                additional_unit_cost_net=sum(
+                    (item.amount for item in payload.additional_unit_costs), start=0
+                ),
+                sale_price=payload.sale_price,
+                target_margin_pct=payload.target_margin_pct,
+                overrides={
+                    "vat_rate_pct": payload.vat_rate_pct,
+                    "iibb_rate_pct": payload.iibb_rate_pct,
+                    "ads_rate_pct": payload.ads_rate_pct,
+                    "refund_rate_pct": payload.refund_rate_pct,
+                },
+                package=payload.package,
+                currency_id=payload.currency_id,
+            )
+        )
+    except PricingDomainError as exc:
+        raise _calculator_error(exc) from exc
+    return PricingCalculatorResponse.model_validate(calculation)
 
 
 @router.post("/calculator/new", response_model=PricingCalculatorResponse)

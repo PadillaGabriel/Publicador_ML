@@ -23,7 +23,11 @@ class PublicationSpy:
 
 
 class CalculatorServiceStub:
+    def __init__(self) -> None:
+        self.requests = []
+
     def calculate_new_product(self, request):
+        self.requests.append(request)
         result = EconomicResult(
             gross_price=Decimal("24200"), net_price=Decimal("20000"), vat_debit=Decimal("4200"),
             gross_cmv=Decimal("12100"), net_cmv=Decimal("10000"), cmv_vat_credit=Decimal("2100"),
@@ -114,3 +118,36 @@ def test_calculator_domain_errors_are_returned_as_stable_422_details(monkeypatch
 
     assert response.status_code == 422
     assert response.json()["detail"]["code"] == "SIN_CMV"
+
+
+def test_legacy_simulation_endpoint_uses_the_pricing_calculator_service(monkeypatch):
+    """Catches the publisher compatibility endpoint keeping a second economic engine."""
+    from app.pricing import router as pricing_router
+
+    service = CalculatorServiceStub()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[pricing_router.get_db] = lambda: object()
+    monkeypatch.setattr(pricing_router, "build_calculator_service", lambda db, account_id: service)
+
+    response = TestClient(app).post(
+        "/api/pricing/simulate",
+        json={
+            "account_id": str(uuid4()),
+            "category_id": "MLA412517",
+            "listing_type_id": "gold_special",
+            "product_cost": "12100",
+            "sale_price": "18000",
+            "additional_unit_costs": [{"name": "Packing", "amount": "300"}],
+            "package": {
+                "dimensions": "10x10x10", "weight": "0.45",
+                "logistic_type": "cross_docking", "shipping_mode": "me2",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["recommended_price"] == "24200"
+    assert service.requests[0].gross_cmv == Decimal("12100")
+    assert service.requests[0].additional_unit_cost_net == Decimal("300")
+    assert service.requests[0].sale_price == Decimal("18000")

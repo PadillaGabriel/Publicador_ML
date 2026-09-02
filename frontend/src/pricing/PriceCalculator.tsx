@@ -4,7 +4,10 @@ import { PricingBreakdown } from "./PricingBreakdown";
 import { PricingTargets } from "./PricingTargets";
 import { normalizeCalculation, type PricingCalculation, type PricingCalculatorApiResponse } from "./types";
 
-type Props = { onUseRecommendedPrice: (price: number) => void; accountId?: string };
+type Props = {
+  onUseRecommendedPrice: (price: number, calculation: PricingCalculation) => void;
+  accountId?: string;
+};
 type Mode = "existing" | "new";
 
 const initialForm = { accountId: "", grossCmv: "", targetMarginPct: "", adsRatePct: "", iibbRatePct: "", refundRatePct: "", itemId: "", mlaId: "", sku: "", categoryId: "", listingTypeId: "", dimensions: "", weight: "", logisticType: "", shippingMode: "" };
@@ -59,6 +62,6 @@ export function PriceCalculator({ onUseRecommendedPrice, accountId = "" }: Props
       <button type="button" disabled={busy || !form.accountId || !form.grossCmv} onClick={calculate}>{busy ? "Calculando…" : "Calcular precio"}</button>
       {error && <div className="notice pricingError">{error}</div>}
     </section>
-    {result && <><PricingBreakdown breakdown={result.analyzed} /><PricingTargets calculation={result} onUseRecommendedPrice={onUseRecommendedPrice} /></>}
+    {result && <><PricingBreakdown breakdown={result.analyzed} /><PricingTargets calculation={result} onUseRecommendedPrice={price => onUseRecommendedPrice(price, result)} /></>}
   </>;
 }

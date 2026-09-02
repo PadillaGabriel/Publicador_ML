@@ -56,19 +56,6 @@ class AdditionalUnitCost(BaseModel):
     amount: Decimal = Field(ge=0)
 
 
-class PricingSimulationRequest(BaseModel):
-    product_cost: Decimal = Field(ge=0)
-    additional_unit_costs: list[AdditionalUnitCost] = Field(default_factory=list, max_length=30)
-    sale_price: Decimal | None = Field(default=None, gt=0)
-    target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
-    vat_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
-    iibb_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
-    ads_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
-    refund_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
-    units_per_order: Decimal = Field(default=Decimal("1"), gt=0)
-    channel: str = Field(default="MERCADOLIBRE", min_length=1, max_length=40)
-
-
 class EconomicOverrides(BaseModel):
     vat_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     iibb_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
@@ -83,12 +70,32 @@ class PackageInput(BaseModel):
     shipping_mode: str | None = Field(default=None, max_length=80)
 
 
+class PricingSimulationRequest(BaseModel):
+    """Temporary publisher contract backed by the pricing application service."""
+
+    account_id: UUID | None = None
+    category_id: str | None = Field(default=None, max_length=40)
+    listing_type_id: str | None = Field(default=None, max_length=40)
+    product_cost: Decimal = Field(ge=0)
+    additional_unit_costs: list[AdditionalUnitCost] = Field(default_factory=list, max_length=30)
+    sale_price: Decimal | None = Field(default=None, gt=0)
+    target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    vat_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    iibb_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    ads_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    refund_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    package: PackageInput | None = None
+    currency_id: str = Field(default="ARS", min_length=3, max_length=10)
+
+
 class NewProductPricingRequest(BaseModel):
     sku: str | None = Field(default=None, max_length=120)
     account_id: UUID | None = None
     category_id: str | None = Field(default=None, max_length=40)
     listing_type_id: str | None = Field(default=None, max_length=40)
     gross_cmv: Decimal | None = Field(default=None, ge=0)
+    additional_unit_cost_net: Decimal = Field(default=Decimal("0"), ge=0)
+    sale_price: Decimal | None = Field(default=None, gt=0)
     target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     overrides: EconomicOverrides = Field(default_factory=EconomicOverrides)
     package: PackageInput | None = None

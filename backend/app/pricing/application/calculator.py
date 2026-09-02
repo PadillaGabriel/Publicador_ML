@@ -85,14 +85,14 @@ class PricingCalculatorService:
             currency_id=request.currency_id,
             package=request.package,
         )
-        seed_price = request.gross_cmv * Decimal(2)
         return self._calculate(
             scenario="NEW_PRODUCT",
             gross_cmv=request.gross_cmv,
+            additional_unit_cost_net=request.additional_unit_cost_net,
             target_margin_pct=request.target_margin_pct,
             overrides=request.overrides.model_dump(),
             context=context,
-            seed_price=seed_price,
+            seed_price=request.sale_price or request.gross_cmv * Decimal(2),
         )
 
     def calculate_existing_listing(
@@ -132,6 +132,7 @@ class PricingCalculatorService:
         return self._calculate(
             scenario="EXISTING_LISTING",
             gross_cmv=request.gross_cmv,
+            additional_unit_cost_net=Decimal(0),
             target_margin_pct=request.target_margin_pct,
             overrides=request.overrides.model_dump(),
             context=context,
@@ -143,6 +144,7 @@ class PricingCalculatorService:
         *,
         scenario: Literal["NEW_PRODUCT", "EXISTING_LISTING"],
         gross_cmv: Decimal,
+        additional_unit_cost_net: Decimal,
         target_margin_pct: Decimal | None,
         overrides: Mapping[str, Decimal | None],
         context: MarketplaceSimulationContext,
@@ -151,7 +153,7 @@ class PricingCalculatorService:
         effective = resolve_effective_economic_parameters(self._profile, overrides)
 
         def evaluate(price: Decimal) -> EconomicResult:
-            return self._evaluate(price, gross_cmv, effective, context)
+            return self._evaluate(price, gross_cmv, additional_unit_cost_net, effective, context)
 
         analyzed = evaluate(seed_price)
         mc0 = self._optimizer.solve(evaluate, Decimal(0), seed_price)
@@ -193,11 +195,14 @@ class PricingCalculatorService:
         self,
         price: Decimal,
         gross_cmv: Decimal,
+        additional_unit_cost_net: Decimal,
         effective: EffectiveEconomicParameters,
         context: MarketplaceSimulationContext,
     ) -> EconomicResult:
         marketplace = self._provider.simulate(context, price)
-        additional_unit_cost = self._additional_unit_cost(price, gross_cmv, effective)
+        additional_unit_cost = additional_unit_cost_net + self._additional_unit_cost(
+            price, gross_cmv, effective
+        )
         return evaluate_economics(
             EconomicInputs(
                 gross_price=price,
