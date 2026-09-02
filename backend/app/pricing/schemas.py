@@ -1,5 +1,6 @@
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -66,3 +67,39 @@ class PricingSimulationRequest(BaseModel):
     refund_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     units_per_order: Decimal = Field(default=Decimal("1"), gt=0)
     channel: str = Field(default="MERCADOLIBRE", min_length=1, max_length=40)
+
+
+class EconomicOverrides(BaseModel):
+    vat_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    iibb_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    ads_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    refund_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+
+
+class PackageInput(BaseModel):
+    dimensions: str | None = Field(default=None, max_length=120)
+    weight: Decimal | None = Field(default=None, gt=0)
+    logistic_type: str | None = Field(default=None, max_length=80)
+    shipping_mode: str | None = Field(default=None, max_length=80)
+
+
+class NewProductPricingRequest(BaseModel):
+    sku: str | None = Field(default=None, max_length=120)
+    account_id: UUID | None = None
+    category_id: str | None = Field(default=None, max_length=40)
+    listing_type_id: str | None = Field(default=None, max_length=40)
+    gross_cmv: Decimal | None = Field(default=None, ge=0)
+    target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    overrides: EconomicOverrides = Field(default_factory=EconomicOverrides)
+    package: PackageInput | None = None
+    currency_id: str = Field(default="ARS", min_length=3, max_length=10)
+
+
+class ExistingListingPricingRequest(BaseModel):
+    account_id: UUID | None = None
+    item_id: str | None = Field(default=None, max_length=80)
+    mla_id: str | None = Field(default=None, max_length=80)
+    sku: str | None = Field(default=None, max_length=120)
+    gross_cmv: Decimal | None = Field(default=None, ge=0)
+    target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
+    overrides: EconomicOverrides = Field(default_factory=EconomicOverrides)
