@@ -1,3 +1,5 @@
+import pytest
+
 from app.title_intelligence.domain import (
     ProductTitleContext,
     TitleConstraints,
@@ -29,3 +31,76 @@ def test_recommendation_falls_back_to_factual_terms_with_a_maximum_length():
 
     assert result.recommended_title
     assert len(result.recommended_title) <= 30
+
+
+def test_recommendation_uses_supported_terms_from_a_compatible_trend_to_improve_title():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Cesto plástico plegable",
+        attributes={"capacity": "40 L", "use": "ropa"},
+    )
+
+    result = recommend_title(context, ("cesto ropa sucia",), TitleConstraints(max_length=60))
+
+    assert result.recommended_title == "CESTO PLEGABLE PARA ROPA 40L"
+    assert result.matched_trends == ("cesto ropa sucia",)
+    assert result.fallback_used is False
+
+
+def test_recommendation_removes_duplicate_tokens_case_and_plural_insensitively():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Cesto cestos plegable",
+        attributes={"capacity": "40 L", "use": "ropa ropa"},
+    )
+
+    result = recommend_title(context, (), TitleConstraints(max_length=60))
+
+    assert result.recommended_title == "CESTO PLEGABLE 40 L ROPA"
+
+
+def test_recommendation_is_deterministic_for_the_same_input():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Cesto plástico plegable",
+        attributes={"capacity": "40 L", "use": "ropa"},
+    )
+    constraints = TitleConstraints(max_length=60)
+
+    first = recommend_title(context, ("cesto ropa sucia",), constraints)
+    second = recommend_title(context, ("cesto ropa sucia",), constraints)
+
+    assert first == second
+
+
+def test_constraints_reject_a_zero_maximum_length():
+    with pytest.raises(ValueError, match="max_length"):
+        TitleConstraints(max_length=0)
+
+
+def test_recommendation_generates_deduplicated_candidates_within_the_explicit_limit():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Cesto plástico plegable",
+        attributes={"capacity": "40 L", "use": "ropa"},
+    )
+
+    result = recommend_title(context, ("cesto ropa sucia",), TitleConstraints(max_length=60))
+    candidates = (result.recommended_title, *result.alternatives)
+
+    assert 3 <= len(candidates) <= 10
+    assert len(candidates) == len(set(candidates))
+    assert all(len(candidate) <= 60 for candidate in candidates)
+
+
+def test_recommendation_rejects_oversized_candidates_without_cutting_a_word():
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Cesto plástico plegable",
+        attributes={"capacity": "40 L", "use": "ropa"},
+    )
+
+    result = recommend_title(context, (), TitleConstraints(max_length=7))
+
+    assert result.recommended_title == "CESTO"
+    assert all(len(candidate) <= 7 for candidate in (result.recommended_title, *result.alternatives))
