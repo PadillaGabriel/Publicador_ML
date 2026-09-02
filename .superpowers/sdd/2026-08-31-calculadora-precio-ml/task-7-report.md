@@ -32,3 +32,17 @@
 - Ruff: passed for the new calculator and application exports; import-order
   checks passed for the modified schemas and focused tests.
 - `git diff --check`: passed.
+
+## Review fix round 1
+
+- Effective active components now feed every economic evaluation. Fixed per-unit
+  and per-order values are included directly; percentage components use their
+  declared basis; fixed monthly values are allocated only when the profile has a
+  positive monthly-unit projection, otherwise `SIN_PARAMETROS_ECONOMICOS` is
+  returned explicitly.
+- `MercadoLibrePricingProvider.resolve_existing_listing()` now composes the
+  confirmed `item()` and `item_prices()` transport calls to obtain category,
+  listing type, standard current price, currency, and shipping package context.
+- New local-fixture tests prove component effects on the analyzed economics and
+  target prices, safe fixed-monthly handling, basis use, and provider baseline
+  resolution. No external requests were made.

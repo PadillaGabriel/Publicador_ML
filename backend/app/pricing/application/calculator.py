@@ -19,7 +19,10 @@ from app.pricing.domain import (
     evaluate_economics,
 )
 from app.pricing.domain.models import MarketplaceEconomics
-from app.pricing.infrastructure.mercadolibre import MarketplaceSimulationContext
+from app.pricing.infrastructure.mercadolibre import (
+    ExistingListingContext,
+    MarketplaceSimulationContext,
+)
 from app.pricing.schemas import (
     ExistingListingPricingRequest,
     NewProductPricingRequest,
@@ -33,15 +36,6 @@ class MarketplacePricingProvider(Protocol):
     def simulate(
         self, context: MarketplaceSimulationContext, gross_price: Decimal
     ) -> MarketplaceEconomics: ...
-
-
-@dataclass(frozen=True, slots=True)
-class ExistingListingContext:
-    category_id: str | None
-    listing_type_id: str | None
-    current_price: Decimal | None
-    currency_id: str | None
-    package: PackageInput | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -203,6 +197,7 @@ class PricingCalculatorService:
         context: MarketplaceSimulationContext,
     ) -> EconomicResult:
         marketplace = self._provider.simulate(context, price)
+        additional_unit_cost = self._additional_unit_cost(price, gross_cmv, effective)
         return evaluate_economics(
             EconomicInputs(
                 gross_price=price,
@@ -211,10 +206,54 @@ class PricingCalculatorService:
                 iibb_rate=effective.iibb_rate_pct / HUNDRED,
                 ads_rate=effective.ads_rate_pct / HUNDRED,
                 refund_rate=effective.refund_rate_pct / HUNDRED,
-                additional_unit_cost=Decimal(0),
+                additional_unit_cost=additional_unit_cost,
             ),
             marketplace,
         )
+
+    def _additional_unit_cost(
+        self,
+        price: Decimal,
+        gross_cmv: Decimal,
+        effective: EffectiveEconomicParameters,
+    ) -> Decimal:
+        vat_factor = Decimal(1) + effective.vat_rate_pct / HUNDRED
+        bases = {
+            "GROSS_SALE": price,
+            "NET_SALE_EX_VAT": price / vat_factor,
+            "TAXABLE_REVENUE": price / vat_factor,
+            "PRODUCT_COST": gross_cmv / vat_factor,
+            "FIXED_PER_UNIT": Decimal(1),
+            "FIXED_PER_ORDER": Decimal(1),
+        }
+        additional_cost = Decimal(0)
+        for component in effective.components:
+            if component.kind in {"FIXED_PER_UNIT", "FIXED_PER_ORDER"}:
+                additional_cost += component.value
+                continue
+            if component.kind == "FIXED_MONTHLY":
+                units = self._profile.monthly_units_projection
+                if units is None or units <= 0:
+                    raise PricingDomainError(
+                        "SIN_PARAMETROS_ECONOMICOS",
+                        "A monthly units projection is required to allocate fixed monthly costs.",
+                    )
+                additional_cost += component.value / Decimal(units)
+                continue
+            base = bases.get(component.basis)
+            if base is None:
+                raise PricingDomainError(
+                    "SIN_PARAMETROS_ECONOMICOS",
+                    f"Unsupported calculation basis: {component.basis}.",
+                )
+            if component.kind in {"PERCENTAGE_OF_PRICE", "PERCENTAGE_OF_COST"}:
+                additional_cost += base * component.value / HUNDRED
+                continue
+            raise PricingDomainError(
+                "SIN_PARAMETROS_ECONOMICOS",
+                f"Unsupported cost component kind: {component.kind}.",
+            )
+        return additional_cost
 
     @staticmethod
     def _simulation_context(

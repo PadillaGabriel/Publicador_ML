@@ -33,6 +33,33 @@ class CountingListingPricesClient(ListingPricesFixtureClient):
         return super().listing_prices(**context)
 
 
+class ExistingListingFixtureClient(ListingPricesFixtureClient):
+    def item(self, item_id: str) -> dict[str, object]:
+        assert item_id == "MLA123"
+        return {
+            "id": item_id,
+            "category_id": "MLA412517",
+            "listing_type_id": "gold_special",
+            "currency_id": "ARS",
+            "shipping": {
+                "dimensions": "10x10x10,450",
+                "logistic_type": "cross_docking",
+                "mode": "me2",
+            },
+        }
+
+    def item_prices(self, item_id: str, *, show_all: bool = True) -> dict[str, object]:
+        assert item_id == "MLA123"
+        assert show_all is True
+        return {
+            "id": item_id,
+            "prices": [
+                {"type": "promotion", "amount": Decimal("15199.20"), "currency_id": "ARS"},
+                {"type": "standard", "amount": Decimal("17745.05"), "currency_id": "ARS"},
+            ],
+        }
+
+
 def load_fixture(name: str) -> dict[str, object]:
     return json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
 
@@ -215,3 +242,18 @@ def test_provider_rejects_unavailable_prospective_logistics_without_zero_shippin
         provider.simulate(simulation_context(), Decimal("17745.05"))
 
     assert exc.value.code == "SIN_CONTEXTO_LOGISTICO"
+
+
+def test_provider_resolves_existing_listing_from_item_and_standard_item_price() -> None:
+    """Catches calculator baselines that bypass the confirmed item and item-prices transport."""
+    provider = mercadolibre.MercadoLibrePricingProvider(
+        ExistingListingFixtureClient(load_fixture("listing_prices.json"))
+    )
+
+    baseline = provider.resolve_existing_listing(account_id=uuid4(), item_id="MLA123")
+
+    assert baseline.category_id == "MLA412517"
+    assert baseline.listing_type_id == "gold_special"
+    assert baseline.current_price == Decimal("17745.05")
+    assert baseline.currency_id == "ARS"
+    assert baseline.package.dimensions == "10x10x10,450"

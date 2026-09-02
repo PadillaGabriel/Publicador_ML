@@ -9,12 +9,12 @@ from app.persistence import PricingCostComponent, PricingProfile
 from app.pricing import service
 from app.pricing.application import resolve_effective_economic_parameters
 from app.pricing.application.calculator import (
-    ExistingListingContext,
     PricingCalculatorService,
 )
 from app.pricing.domain import PricingDomainError
 from app.pricing.domain.models import MarketplaceEconomics
 from app.pricing.infrastructure.cache import PricingCacheKey, PricingSimulationCache
+from app.pricing.infrastructure.mercadolibre import MercadoLibrePricingProvider
 from app.pricing.schemas import (
     EconomicOverrides,
     ExistingListingPricingRequest,
@@ -229,17 +229,34 @@ class CalculatorProvider:
             buyer_shipping_amount=Decimal("0"),
         )
 
-    def resolve_existing_listing(self, *, account_id, item_id):
-        return ExistingListingContext(
-            category_id="MLA412517",
-            listing_type_id="gold_special",
-            current_price=Decimal("24200"),
-            currency_id="ARS",
-            package=PackageInput(
-                dimensions="10x10x10", weight=Decimal("0.45"),
-                logistic_type="cross_docking", shipping_mode="me2",
-            ),
-        )
+
+class ExistingListingTransport:
+    def item(self, item_id):
+        assert item_id == "MLA123"
+        return {
+            "category_id": "MLA412517",
+            "listing_type_id": "gold_special",
+            "currency_id": "ARS",
+            "shipping": {
+                "dimensions": "10x10x10,450",
+                "logistic_type": "cross_docking",
+                "mode": "me2",
+            },
+        }
+
+    def item_prices(self, item_id, *, show_all=True):
+        assert item_id == "MLA123"
+        assert show_all is True
+        prices = [{"type": "standard", "amount": Decimal("24200")}]
+        return {"prices": prices}
+
+    def listing_prices(self, **_context):
+        raise AssertionError("Calculator test simulates economics below the provider boundary.")
+
+
+class ExistingListingCalculatorProvider(MercadoLibrePricingProvider):
+    def simulate(self, context, gross_price):
+        return CalculatorProvider().simulate(context, gross_price)
 
 
 def calculator_profile() -> PricingProfile:
@@ -309,7 +326,9 @@ def test_new_product_rejects_missing_economic_or_marketplace_context(pricing_req
 
 def test_existing_listing_resolves_marketplace_context_and_current_price():
     """Catches requiring manually duplicated MLA category, listing type, or current price."""
-    service = PricingCalculatorService(profile=calculator_profile(), provider=CalculatorProvider())
+    service = PricingCalculatorService(
+        profile=calculator_profile(), provider=ExistingListingCalculatorProvider(ExistingListingTransport())
+    )
 
     response = service.calculate_existing_listing(
         ExistingListingPricingRequest(account_id=uuid4(), item_id="MLA123", gross_cmv=Decimal("12100"))
@@ -330,3 +349,104 @@ def test_existing_listing_sku_without_a_reliable_baseline_lookup_is_explicitly_r
         )
 
     assert exc.value.code == "SIN_BASELINE_CONFIABLE"
+
+
+def test_active_fixed_unit_component_reduces_economics_and_raises_target_price():
+    """Catches effective profile components being ignored by calculator evaluations."""
+    request = NewProductPricingRequest(
+        sku="SKU-1",
+        account_id=uuid4(),
+        category_id="MLA412517",
+        listing_type_id="gold_special",
+        gross_cmv=Decimal("12100"),
+        package=PackageInput(
+            dimensions="10x10x10", weight=Decimal("0.45"),
+            logistic_type="cross_docking", shipping_mode="me2",
+        ),
+    )
+    baseline = PricingCalculatorService(profile=calculator_profile(), provider=CalculatorProvider())
+    profile_with_cost = calculator_profile()
+    profile_with_cost.components = [
+        PricingCostComponent(
+            name="Packing",
+            kind="FIXED_PER_UNIT",
+            value=Decimal("1000"),
+            basis="FIXED_PER_UNIT",
+            active=True,
+        )
+    ]
+    with_cost = PricingCalculatorService(profile=profile_with_cost, provider=CalculatorProvider())
+
+    baseline_response = baseline.calculate_new_product(request)
+    response = with_cost.calculate_new_product(request)
+
+    assert response.analyzed.additional_unit_cost_net == Decimal("1000.00")
+    assert response.analyzed.contribution_margin == baseline_response.analyzed.contribution_margin - Decimal(
+        "1000.00"
+    )
+    assert response.mc20.gross_price > baseline_response.mc20.gross_price
+
+
+def test_fixed_monthly_component_requires_a_monthly_unit_projection():
+    """Catches silently omitting a fixed monthly cost when it cannot be allocated."""
+    profile = calculator_profile()
+    profile.components = [
+        PricingCostComponent(
+            name="Warehouse",
+            kind="FIXED_MONTHLY",
+            value=Decimal("3000"),
+            basis="FIXED_PER_UNIT",
+            active=True,
+        )
+    ]
+    service = PricingCalculatorService(profile=profile, provider=CalculatorProvider())
+    request = NewProductPricingRequest(
+        account_id=uuid4(),
+        category_id="MLA412517",
+        listing_type_id="gold_special",
+        gross_cmv=Decimal("12100"),
+        package=PackageInput(
+            dimensions="10x10x10", weight=Decimal("0.45"),
+            logistic_type="cross_docking", shipping_mode="me2",
+        ),
+    )
+
+    with pytest.raises(PricingDomainError) as exc:
+        service.calculate_new_product(request)
+
+    assert exc.value.code == "SIN_PARAMETROS_ECONOMICOS"
+
+    profile.monthly_units_projection = 10
+    response = service.calculate_new_product(request)
+
+    assert response.analyzed.additional_unit_cost_net == Decimal("300.00")
+
+
+def test_active_percentage_component_uses_its_declared_net_sale_basis():
+    """Catches percentage components being calculated against an implicit or wrong base."""
+    profile = calculator_profile()
+    profile.components = [
+        PricingCostComponent(
+            name="Payment service",
+            kind="PERCENTAGE_OF_PRICE",
+            value=Decimal("10"),
+            basis="NET_SALE_EX_VAT",
+            active=True,
+        )
+    ]
+    service = PricingCalculatorService(profile=profile, provider=CalculatorProvider())
+
+    response = service.calculate_new_product(
+        NewProductPricingRequest(
+            account_id=uuid4(),
+            category_id="MLA412517",
+            listing_type_id="gold_special",
+            gross_cmv=Decimal("12100"),
+            package=PackageInput(
+                dimensions="10x10x10", weight=Decimal("0.45"),
+                logistic_type="cross_docking", shipping_mode="me2",
+            ),
+        )
+    )
+
+    assert response.analyzed.additional_unit_cost_net == Decimal("2000.00")

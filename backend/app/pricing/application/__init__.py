@@ -1,5 +1,4 @@
 from app.pricing.application.calculator import (
-    ExistingListingContext,
     PricingAudit,
     PricingCalculationResponse,
     PricingCalculatorService,
@@ -9,6 +8,7 @@ from app.pricing.application.effective_parameters import (
     EffectiveEconomicParameters,
     resolve_effective_economic_parameters,
 )
+from app.pricing.infrastructure.mercadolibre import ExistingListingContext
 
 __all__ = [
     "EffectiveCostComponent",
