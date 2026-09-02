@@ -2,12 +2,15 @@ import json
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 import pytest
 
 from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
 from app.pricing.domain.errors import PricingDomainError
+from app.pricing.domain.models import MarketplaceEconomics
 from app.pricing.infrastructure import mercadolibre
+from app.pricing.infrastructure.cache import PricingSimulationCache
 
 FIXTURES_DIR = Path(__file__).parents[1] / "fixtures" / "ml"
 
@@ -20,19 +23,76 @@ class ListingPricesFixtureClient:
         return self.response
 
 
+class CountingListingPricesClient(ListingPricesFixtureClient):
+    def __init__(self, response: object) -> None:
+        super().__init__(response)
+        self.calls = 0
+
+    def listing_prices(self, **context: object) -> object:
+        self.calls += 1
+        return super().listing_prices(**context)
+
+
 def load_fixture(name: str) -> dict[str, object]:
     return json.loads((FIXTURES_DIR / name).read_text(encoding="utf-8"))
 
 
 def simulation_context(listing_type_id: str = "gold_special") -> object:
     return mercadolibre.MarketplaceSimulationContext(
+        account_id=uuid4(),
         site_id="MLA",
         category_id="MLA412517",
         listing_type_id=listing_type_id,
         currency_id="ARS",
         logistic_type="cross_docking",
         shipping_mode="me2",
+        billable_weight=Decimal("0.45"),
     )
+
+
+def complete_marketplace_economics() -> MarketplaceEconomics:
+    return MarketplaceEconomics(
+        percentage_fee=Decimal(16),
+        meli_percentage_fee=Decimal(16),
+        financing_add_on_fee=Decimal(0),
+        fixed_fee=Decimal(2740),
+        shipping_cost=Decimal(1200),
+        shipping_subsidy=Decimal(0),
+        buyer_shipping_amount=Decimal(0),
+    )
+
+
+def test_provider_reuses_a_complete_simulation_from_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Catches bypassing the cache before repeating the marketplace client request."""
+    client = CountingListingPricesClient(load_fixture("listing_prices.json"))
+    provider = mercadolibre.MercadoLibrePricingProvider(
+        client, cache=PricingSimulationCache(max_entries=8, ttl_seconds=60)
+    )
+    monkeypatch.setattr(provider, "parse_listing_prices", lambda *_args: complete_marketplace_economics())
+    context = simulation_context()
+
+    first = provider.simulate(context, Decimal(20000))
+    second = provider.simulate(context, Decimal(20000))
+
+    assert first == second
+    assert client.calls == 1
+
+
+def test_provider_does_not_reuse_a_simulation_with_a_different_price(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Catches a provider cache key that omits the gross price discriminator."""
+    client = CountingListingPricesClient(load_fixture("listing_prices.json"))
+    provider = mercadolibre.MercadoLibrePricingProvider(
+        client, cache=PricingSimulationCache(max_entries=8, ttl_seconds=60)
+    )
+    monkeypatch.setattr(provider, "parse_listing_prices", lambda *_args: complete_marketplace_economics())
+    context = simulation_context()
+
+    provider.simulate(context, Decimal(20000))
+    provider.simulate(context, Decimal(25000))
+
+    assert client.calls == 2
 
 
 @pytest.fixture
