@@ -144,6 +144,35 @@ class MercadoLibreClient:
     def create_item_description(self, item_id: str, plain_text: str) -> PublishResponse:
         return self.post(f"/items/{item_id}/description", {"plain_text": plain_text})
 
+    def item(self, item_id: str) -> dict:
+        value = self.get(f"/items/{item_id}")
+        if not isinstance(value, dict):
+            raise MercadoLibreError("Unexpected item response.")
+        return value
+
+    def listing_prices(
+        self,
+        *,
+        site_id: str,
+        category_id: str,
+        listing_type_id: str,
+        price: object,
+        currency_id: str,
+        logistic_type: str | None = None,
+        shipping_mode: str | None = None,
+    ) -> list[dict] | dict:
+        params = {
+            "category_id": category_id,
+            "listing_type_id": listing_type_id,
+            "price": str(price),
+            "currency_id": currency_id,
+        }
+        if logistic_type is not None:
+            params["logistic_type"] = logistic_type
+        if shipping_mode is not None:
+            params["shipping_mode"] = shipping_mode
+        return self.get(f"/sites/{site_id}/listing_prices?{urlencode(params)}")
+
     def item_prices(self, item_id: str, *, show_all: bool = True) -> dict:
         value = self.get(
             f"/items/{item_id}/prices",

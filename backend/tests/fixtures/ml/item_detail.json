@@ -1,0 +1,18 @@
+{
+  "id": "MLA_SANITIZED",
+  "price": 17745.05,
+  "currency_id": "ARS",
+  "listing_type_id": "gold_special",
+  "shipping": {
+    "mode": "me2",
+    "methods": [],
+    "tags": [
+      "self_service_in"
+    ],
+    "dimensions": null,
+    "local_pick_up": true,
+    "free_shipping": false,
+    "logistic_type": "cross_docking",
+    "store_pick_up": false
+  }
+}
