@@ -1,8 +1,116 @@
+from datetime import timedelta
+from types import SimpleNamespace
+
+import pytest
+
+from app.core.time import utcnow
+from app.integrations.mercadolibre.client import MercadoLibreError
 from app.keywords.relevance import (
     build_product_evidence,
     rank_trends,
     select_assessed_keywords,
 )
+from app.keywords.service import (
+    KeywordResearchError,
+    build_ml_keyword_snapshot,
+    get_category_trends,
+)
+from app.persistence import KeywordTrendSnapshot
+
+
+class _TrendDb:
+    def __init__(self, snapshot=None):
+        self.added = []
+        self.snapshot = snapshot
+
+    def scalar(self, _query):
+        return self.snapshot
+
+    def add(self, value):
+        self.added.append(value)
+
+    def flush(self):
+        pass
+
+
+def test_category_trends_exposes_a_stable_lookup_contract(monkeypatch):
+    monkeypatch.setattr("app.keywords.service.MercadoLibreClient.category_trends", lambda *_: ["cesto ropa"])
+
+    lookup = get_category_trends(_TrendDb(), site_id="MLA", category_id="MLA1", access_token="token")
+
+    assert lookup.terms == ("cesto ropa",)
+    assert lookup.cache_status == "MISS_FETCHED"
+    assert lookup.snapshot is not None
+
+
+def test_category_trends_returns_stale_snapshot_when_provider_fails(monkeypatch):
+    snapshot = KeywordTrendSnapshot(
+        site_id="MLA",
+        category_id="MLA1",
+        terms=["cesto ropa", "organizador"],
+        fetched_at=utcnow() - timedelta(days=2),
+        expires_at=utcnow() - timedelta(days=1),
+    )
+    monkeypatch.setattr(
+        "app.keywords.service.MercadoLibreClient.category_trends",
+        lambda *_: (_ for _ in ()).throw(MercadoLibreError("provider unavailable")),
+    )
+
+    lookup = get_category_trends(
+        _TrendDb(snapshot), site_id="MLA", category_id="MLA1", access_token="token"
+    )
+
+    assert lookup.terms == ("cesto ropa", "organizador")
+    assert lookup.snapshot is snapshot
+    assert lookup.cache_status == "STALE_FALLBACK"
+
+
+def test_category_trends_returns_unavailable_without_snapshot_when_provider_fails(monkeypatch):
+    monkeypatch.setattr(
+        "app.keywords.service.MercadoLibreClient.category_trends",
+        lambda *_: (_ for _ in ()).throw(MercadoLibreError("provider unavailable")),
+    )
+
+    lookup = get_category_trends(
+        _TrendDb(), site_id="MLA", category_id="MLA1", access_token="token"
+    )
+
+    assert lookup.terms == ()
+    assert lookup.snapshot is None
+    assert lookup.cache_status == "UNAVAILABLE"
+
+
+@pytest.mark.parametrize(
+    ("status_code", "expected_retryable"),
+    [(400, False), (503, True)],
+)
+def test_keyword_snapshot_preserves_trend_error_retryability(
+    monkeypatch,
+    status_code,
+    expected_retryable,
+):
+    """Catches unavailable trend lookups being flattened to always retryable."""
+    provider_error = MercadoLibreError(
+        f"Mercado Libre HTTP {status_code}",
+        status_code=status_code,
+    )
+    monkeypatch.setattr(
+        "app.keywords.service.MercadoLibreClient.category_trends",
+        lambda *_: (_ for _ in ()).throw(provider_error),
+    )
+    version = SimpleNamespace(id="version-1", category_id="MLA1")
+
+    with pytest.raises(KeywordResearchError) as exc_info:
+        build_ml_keyword_snapshot(
+            _TrendDb(),
+            version=version,
+            site_id="MLA",
+            category_name="Cestos",
+            access_token="token",
+        )
+
+    assert exc_info.value.code == "ML_KEYWORD_TRENDS_UNAVAILABLE"
+    assert exc_info.value.retryable is expected_retryable
 
 
 def _product_evidence():

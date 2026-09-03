@@ -11,7 +11,7 @@ from app.integrations.mercadolibre.attribute_contracts import (
 
 _BOOLEAN_NAMES = {"si", "sí", "no", "yes", "true", "false"}
 _CUSTOM_VALUE_TYPES = {"string", "number", "number_unit"}
-NORMALIZED_SCHEMA_VERSION = 5
+NORMALIZED_SCHEMA_VERSION = 6
 
 
 def _numeric_relevance(value: Any) -> float:
@@ -55,7 +55,16 @@ def _importance(
     return "secondary"
 
 
-def normalize_attributes(raw_attributes: list[dict]) -> dict:
+def _title_settings(raw_category: dict | None) -> dict[str, int]:
+    category = raw_category if isinstance(raw_category, dict) else {}
+    settings = category.get("settings") or {}
+    max_title_length = settings.get("max_title_length") if isinstance(settings, dict) else None
+    if isinstance(max_title_length, int) and not isinstance(max_title_length, bool) and max_title_length > 0:
+        return {"max_title_length": max_title_length}
+    return {}
+
+
+def normalize_attributes(raw_attributes: list[dict], raw_category: dict | None = None) -> dict:
     fields = []
     for position, attr in enumerate(raw_attributes):
         tags = attr.get("tags") or {}
@@ -199,6 +208,7 @@ def normalize_attributes(raw_attributes: list[dict]) -> dict:
 
     return {
         "schema_version": NORMALIZED_SCHEMA_VERSION,
+        "settings": _title_settings(raw_category),
         "fields": fields,
         "requirements": requirements,
         "product_identifier_contract": product_identifier_contract,

@@ -1,4 +1,13 @@
-from app.catalog.normalization import category_is_publishable_leaf, normalize_attributes
+from datetime import timedelta
+
+from app.catalog import service
+from app.catalog.normalization import (
+    NORMALIZED_SCHEMA_VERSION,
+    category_is_publishable_leaf,
+    normalize_attributes,
+)
+from app.core.time import utcnow
+from app.persistence import CategoryMetadataSnapshot
 
 
 def _field(attribute: dict) -> dict:
@@ -223,10 +232,61 @@ def test_number_unit_schema_preserves_allowed_and_default_units():
     ])
 
     field = schema["fields"][0]
-    assert schema["schema_version"] == 5
+    assert schema["schema_version"] == 6
     assert field["is_measurement"] is True
     assert field["allowed_units"] == [
         {"id": "mm", "name": "mm"},
         {"id": "cm", "name": "cm"},
     ]
     assert field["default_unit"] == "cm"
+
+
+def test_schema_exposes_only_a_valid_positive_category_title_limit():
+    schema = normalize_attributes(
+        [],
+        raw_category={"settings": {"max_title_length": 60}},
+    )
+
+    assert schema["settings"] == {"max_title_length": 60}
+
+    for invalid_limit in (0, -1, True, "60"):
+        invalid_schema = normalize_attributes(
+            [],
+            raw_category={"settings": {"max_title_length": invalid_limit}},
+        )
+        assert invalid_schema["settings"] == {}
+
+
+class _CachedSnapshotSession:
+    def __init__(self, snapshot: CategoryMetadataSnapshot) -> None:
+        self.snapshot = snapshot
+        self.commits = 0
+
+    def scalar(self, _statement: object) -> CategoryMetadataSnapshot:
+        return self.snapshot
+
+    def commit(self) -> None:
+        self.commits += 1
+
+    def refresh(self, _snapshot: CategoryMetadataSnapshot) -> None:
+        return None
+
+
+def test_cached_metadata_rebuilds_title_limit_from_persisted_raw_category():
+    snapshot = CategoryMetadataSnapshot(
+        site_id="MLA",
+        category_id="MLA123",
+        category_name="Categoría",
+        raw_category={"settings": {"max_title_length": 60}},
+        raw_attributes=[],
+        normalized_schema={"schema_version": NORMALIZED_SCHEMA_VERSION - 1},
+        fetched_at=utcnow(),
+        expires_at=utcnow() + timedelta(minutes=5),
+    )
+    db = _CachedSnapshotSession(snapshot)
+
+    result = service.get_category_metadata(db, "MLA123")
+
+    assert result.normalized_schema["settings"] == {"max_title_length": 60}
+    assert result.normalized_schema["schema_version"] == NORMALIZED_SCHEMA_VERSION
+    assert db.commits == 1
