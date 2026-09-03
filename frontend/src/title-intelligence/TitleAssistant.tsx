@@ -46,6 +46,11 @@ export function TitleAssistant({
   const attributeSignature = JSON.stringify(normalizedAttributes);
   const productName = productText.trim();
   const inputSignature = JSON.stringify({accountId, attributeSignature, categoryId, maxLength, productName});
+  const currentInputSignature = useRef(inputSignature);
+  if (currentInputSignature.current !== inputSignature) {
+    currentInputSignature.current = inputSignature;
+    requestGeneration.current += 1;
+  }
   const hasPositiveLimit = typeof maxLength === "number" && Number.isFinite(maxLength) && maxLength > 0;
   const canGenerate = Boolean(accountId && categoryId && productName && hasPositiveLimit);
 
@@ -60,6 +65,7 @@ export function TitleAssistant({
     if (!canGenerate || !maxLength) return;
 
     const generation = requestGeneration.current + 1;
+    const requestSignature = inputSignature;
     requestGeneration.current = generation;
     setLoading(true);
     setError("");
@@ -74,14 +80,14 @@ export function TitleAssistant({
           max_length: maxLength,
         }),
       });
-      if (generation !== requestGeneration.current) return;
+      if (generation !== requestGeneration.current || requestSignature !== currentInputSignature.current) return;
       setResult(response);
     } catch (requestError) {
-      if (generation !== requestGeneration.current) return;
+      if (generation !== requestGeneration.current || requestSignature !== currentInputSignature.current) return;
       setResult(null);
       setError(requestError instanceof Error ? requestError.message : "No se pudo generar el título.");
     } finally {
-      if (generation === requestGeneration.current) setLoading(false);
+      if (generation === requestGeneration.current && requestSignature === currentInputSignature.current) setLoading(false);
     }
   }
 
