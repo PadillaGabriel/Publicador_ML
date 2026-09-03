@@ -1,5 +1,5 @@
-from pathlib import Path
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,14 +8,15 @@ from fastapi.responses import FileResponse
 from app.accounts.router import router as accounts_router
 from app.catalog.router import router as catalog_router
 from app.core.config import get_settings
+from app.core.db import SessionLocal
 from app.core.logging import configure_logging
 from app.drafts.router import router as drafts_router
 from app.jobs import router as jobs_router
-from app.products.router import router as products_router
-from app.pricing.router import router as pricing_router
-from app.publication.router import router as publication_router
 from app.persistence import ProductImage
-from app.core.db import SessionLocal
+from app.pricing.router import router as pricing_router
+from app.products.router import router as products_router
+from app.publication.router import router as publication_router
+from app.title_intelligence.router import router as title_intelligence_router
 
 configure_logging()
 settings = get_settings()
@@ -41,6 +42,7 @@ app.include_router(pricing_router)
 app.include_router(drafts_router)
 app.include_router(publication_router)
 app.include_router(jobs_router)
+app.include_router(title_intelligence_router)
 
 
 @app.get("/health")
