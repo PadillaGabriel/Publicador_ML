@@ -279,6 +279,21 @@ function App() {
     if (!accountId && result.length === 1) setAccountId(result[0].id);
   }
 
+  async function searchCategoriesForPricing(pricingAccountId: string, query: string) {
+    const result = await api<CategorySuggestion[]>(
+      `/api/catalog/category-suggestions?account_id=${encodeURIComponent(pricingAccountId)}&q=${encodeURIComponent(query)}&limit=8`
+    );
+    if (result.length === 0) throw new Error("No encontramos categorías para esa búsqueda. Probá con otras palabras.");
+    return result;
+  }
+
+  async function loadPublicationTypes(pricingAccountId: string, pricingCategoryId: string) {
+    const response = await api<{options: CommercialOption[]}>(
+      `/api/publication/commercial-options?account_id=${encodeURIComponent(pricingAccountId)}&category_id=${encodeURIComponent(pricingCategoryId)}`
+    );
+    return response.options || [];
+  }
+
   useEffect(() => {
     refreshAccounts().catch(e => setMessage(e.message));
     api<OAuthStatus>("/api/accounts/oauth/status")
@@ -394,9 +409,7 @@ function App() {
     setBatchId("");
     Promise.all([
       api<any>(`/api/catalog/categories/${categoryId}?account_id=${encodeURIComponent(accountId)}`),
-      api<{options: CommercialOption[]}>(
-        `/api/publication/commercial-options?account_id=${encodeURIComponent(accountId)}&category_id=${encodeURIComponent(categoryId)}`
-      ),
+      loadPublicationTypes(accountId, categoryId),
     ])
       .then(([meta, listingResponse]) => {
         if (cancelled) return;
@@ -406,7 +419,7 @@ function App() {
         setRequirements(meta.schema.requirements || []);
         setProductIdentifierContract(loadedIdentifierContract);
 
-        const availableCommercialOptions = listingResponse.options || [];
+        const availableCommercialOptions = listingResponse;
         setCommercialOptions(availableCommercialOptions);
         setCommercialAllocations(current => {
           const previousByIntent = new Map(current.map(row => [row.commercial_intent, row.count]));
@@ -545,9 +558,7 @@ function App() {
       .map(value => value.trim())
       .filter(Boolean)
       .join(" ");
-    const result = await api<CategorySuggestion[]>(
-      `/api/catalog/category-suggestions?account_id=${encodeURIComponent(accountId)}&q=${encodeURIComponent(query)}&limit=8`
-    );
+    const result = await searchCategoriesForPricing(accountId, query);
     setCategorySuggestions(result);
     setCategoryId("");
     setSelectedCategoryName("");
@@ -1128,7 +1139,13 @@ function App() {
 
       <main style={{display: activeView === "price-calculator" ? undefined : "none"}}>
         {message && <div className="notice">{message}</div>}
-        <PriceCalculator accountId={accountId} onUseRecommendedPrice={transferRecommendedPrice} />
+        <PriceCalculator
+          accountId={accountId}
+          accounts={accounts}
+          onSearchCategories={searchCategoriesForPricing}
+          onLoadPublicationTypes={loadPublicationTypes}
+          onUseRecommendedPrice={transferRecommendedPrice}
+        />
       </main>
 
       <main style={{display: activeView === "publisher" ? undefined : "none"}}>

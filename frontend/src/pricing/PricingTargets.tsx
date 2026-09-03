@@ -15,10 +15,10 @@ export function PricingTargets({ calculation, onUseRecommendedPrice, currencyId 
   return <section className="card pricingTargets">
     <div className="sectionTitle"><span>4</span> Objetivos de margen</div>
     <div className="pricingTargetsGrid">
-      <TargetCard title="MC0" target={calculation.mc0} currencyId={currencyId} />
-      <TargetCard title="MC15" target={calculation.mc15} currencyId={currencyId} />
-      <TargetCard title="MC20" target={calculation.mc20} currencyId={currencyId} />
-      <TargetCard title="MC personalizado" target={calculation.custom} currencyId={currencyId} />
+      <TargetCard title="Margen de contribución: 0%" target={calculation.mc0} currencyId={currencyId} />
+      <TargetCard title="Margen de contribución: 15%" target={calculation.mc15} currencyId={currencyId} />
+      <TargetCard title="Margen de contribución: 20%" target={calculation.mc20} currencyId={currencyId} />
+      <TargetCard title="Margen objetivo personalizado" target={calculation.custom} currencyId={currencyId} />
     </div>
     <div className="pricingRecommended"><div><span>Precio económico recomendado</span><b>{money(calculation.recommendedPrice, currencyId)}</b></div><button type="button" onClick={() => onUseRecommendedPrice(Number(calculation.recommendedPrice))}>Usar precio recomendado</button></div>
   </section>;

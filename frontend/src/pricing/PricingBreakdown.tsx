@@ -9,7 +9,7 @@ function money(value: number, currencyId: string) {
 export function PricingBreakdown({ breakdown, currencyId = "ARS" }: Props) {
   const rows: [string, number][] = [
     ["Precio bruto", breakdown.grossPrice], ["Precio neto sin IVA", breakdown.netPrice],
-    ["CMV bruto", breakdown.grossCmv], ["CMV neto", breakdown.netCmv],
+    ["Costo del producto (con IVA)", breakdown.grossCmv], ["Costo del producto (sin IVA)", breakdown.netCmv],
     ["Comisión Mercado Libre neta", breakdown.mlCommissionNet], ["Cargo fijo ML neto", breakdown.mlFixedFeeNet],
     ["Envío", breakdown.shippingCost], ["Bonificación de envío", breakdown.shippingSubsidy],
     ["Envío cobrado al comprador", breakdown.buyerShippingAmount], ["Resultado logístico neto", breakdown.netLogisticCost],

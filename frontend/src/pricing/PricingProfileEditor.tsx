@@ -22,7 +22,7 @@ export function PricingProfileEditor({ profile, busy, onChange, onSave }: Props)
   const removeComponent = (index: number) => update({ components: profile.components.filter((_, position) => position !== index) });
 
   return <>
-    <header><div><h1>Costos y rentabilidad</h1><p>Configurá los valores globales del canal. Los overrides se aplican únicamente a cada simulación.</p></div></header>
+    <header><div><h1>Costos y rentabilidad</h1><p>Configurá los valores globales del canal. Los ajustes cargados en una simulación sólo se aplican a ese cálculo.</p></div></header>
     <section className="card">
       <div className="sectionTitle"><span>1</span> Perfil económico del canal</div>
       <div className="grid3">

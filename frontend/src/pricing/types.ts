@@ -72,6 +72,19 @@ export type PricingCalculation = {
   recommendedPrice: number;
 };
 
+export const LOGISTIC_OPTIONS = [
+  { value: "drop_off", label: "Despacho en punto de entrega" },
+  { value: "cross_docking", label: "Centro de distribución" },
+  { value: "fulfillment", label: "Mercado Libre Full" },
+  { value: "self_service", label: "Logística propia" },
+] as const;
+
+export const SHIPPING_MODE_OPTIONS = [
+  { value: "me2", label: "Mercado Envíos" },
+  { value: "custom", label: "Envío coordinado con el comprador" },
+  { value: "not_specified", label: "A convenir" },
+] as const;
+
 type ApiEconomicResult = {
   gross_price: number; net_price: number; gross_cmv: number; net_cmv: number;
   ml_commission_net: number; ml_fixed_fee_net: number; shipping_cost: number;
