@@ -11,11 +11,38 @@ from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibr
 from app.main import app
 from app.persistence import KeywordTrendSnapshot
 from app.publication import router as publication_router
+from app.title_intelligence import service as title_service
 
 
 class _Account:
     active = True
     site_id = "MLA"
+
+
+class _CacheDb:
+    def __init__(self, snapshot: KeywordTrendSnapshot | None = None) -> None:
+        self.snapshot = snapshot
+        self.added = []
+        self.commits = 0
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        self.closed = True
+
+    def scalar(self, _query):
+        return self.snapshot
+
+    def add(self, value) -> None:
+        self.added.append(value)
+
+    def flush(self) -> None:
+        pass
+
+    def commit(self) -> None:
+        self.commits += 1
 
 
 class _Db:
@@ -28,6 +55,7 @@ class _Db:
         self.snapshot = snapshot
         self.added = []
         self.commits = 0
+        self.cache_db = _CacheDb(snapshot)
 
     def get(self, _model, _account_id):
         return self.account
@@ -43,6 +71,9 @@ class _Db:
 
     def commit(self) -> None:
         self.commits += 1
+
+    def get_bind(self):
+        return self.cache_db
 
 
 class _PublicationSpy:
@@ -83,6 +114,11 @@ def _restore_get_db_override():
         app.dependency_overrides[get_db] = previous
 
 
+@pytest.fixture(autouse=True)
+def _use_isolated_cache_session(monkeypatch):
+    monkeypatch.setattr(title_service, "Session", lambda *, bind: bind)
+
+
 def test_generate_returns_factual_fallback_when_trends_are_unavailable(monkeypatch):
     """Catches an unavailable category-trends provider becoming an HTTP failure."""
     monkeypatch.setattr(accounts_service, "load_access_token", lambda *_: "token")
@@ -102,10 +138,15 @@ def test_generate_returns_factual_fallback_when_trends_are_unavailable(monkeypat
     assert response.json()["confidence"] == "FACTUAL_FALLBACK"
     assert db.commits == 0
     assert db.added == []
+    assert db.cache_db.commits == 0
+    assert db.cache_db.added == []
+    assert db.cache_db.closed is True
 
 
-def test_generate_commits_only_a_newly_fetched_trend_snapshot(monkeypatch):
-    """Catches a fetched trend snapshot being rolled back when the request closes."""
+def test_generate_persists_only_a_newly_fetched_snapshot_in_an_isolated_session(
+    monkeypatch,
+):
+    """Catches cache persistence committing pending caller-session work."""
     db = _Db(_Account())
     monkeypatch.setattr(accounts_service, "load_access_token", lambda *_: "token")
     monkeypatch.setattr(
@@ -119,9 +160,12 @@ def test_generate_commits_only_a_newly_fetched_trend_snapshot(monkeypatch):
     )
 
     assert response.status_code == 200
-    assert db.commits == 1
-    assert len(db.added) == 1
-    assert isinstance(db.added[0], KeywordTrendSnapshot)
+    assert db.commits == 0
+    assert db.added == []
+    assert db.cache_db.commits == 1
+    assert len(db.cache_db.added) == 1
+    assert isinstance(db.cache_db.added[0], KeywordTrendSnapshot)
+    assert db.cache_db.closed is True
 
 
 def test_generate_does_not_commit_a_fresh_trend_hit(monkeypatch):
@@ -149,6 +193,9 @@ def test_generate_does_not_commit_a_fresh_trend_hit(monkeypatch):
     assert response.status_code == 200
     assert db.commits == 0
     assert db.added == []
+    assert db.cache_db.commits == 0
+    assert db.cache_db.added == []
+    assert db.cache_db.closed is True
 
 
 def test_generate_response_has_the_stable_recommendation_shape(monkeypatch):

@@ -16,14 +16,15 @@ def generate_title_recommendation(
         raise HTTPException(status_code=404, detail="Cuenta de Mercado Libre no encontrada.")
 
     access_token = accounts_service.load_access_token(db, payload.account_id)
-    trend_lookup = get_category_trends(
-        db,
-        site_id=account.site_id,
-        category_id=payload.category_id,
-        access_token=access_token,
-    )
-    if trend_lookup.cache_status == "MISS_FETCHED":
-        db.commit()
+    with Session(bind=db.get_bind()) as cache_db:
+        trend_lookup = get_category_trends(
+            cache_db,
+            site_id=account.site_id,
+            category_id=payload.category_id,
+            access_token=access_token,
+        )
+        if trend_lookup.cache_status == "MISS_FETCHED":
+            cache_db.commit()
     trends = () if trend_lookup.cache_status == "UNAVAILABLE" else trend_lookup.terms
     recommendation = recommend_title(
         ProductTitleContext(
