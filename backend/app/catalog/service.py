@@ -37,7 +37,9 @@ def get_category_metadata(
         # schema version changes; this avoids stale UI contracts without an extra
         # external request.
         if (latest.normalized_schema or {}).get("schema_version") != NORMALIZED_SCHEMA_VERSION:
-            latest.normalized_schema = normalize_attributes(latest.raw_attributes or [])
+            latest.normalized_schema = normalize_attributes(
+                latest.raw_attributes or [], latest.raw_category
+            )
             db.commit()
             db.refresh(latest)
         return latest
@@ -52,7 +54,7 @@ def get_category_metadata(
         category_name=category.get("name") or category_id,
         raw_category=category,
         raw_attributes=attributes,
-        normalized_schema=normalize_attributes(attributes),
+        normalized_schema=normalize_attributes(attributes, category),
         fetched_at=now,
         expires_at=now + timedelta(seconds=ttl),
     )

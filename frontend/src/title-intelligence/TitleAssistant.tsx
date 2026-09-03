@@ -1,4 +1,4 @@
-import {useEffect, useMemo, useState} from "react";
+import {useEffect, useMemo, useRef, useState} from "react";
 import {api} from "../api";
 import type {TitleAssistantProps, TitleRecommendationResponse} from "./types";
 
@@ -41,20 +41,26 @@ export function TitleAssistant({
   const [result, setResult] = useState<TitleRecommendationResponse | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
+  const requestGeneration = useRef(0);
   const normalizedAttributes = useMemo(() => factualAttributes(attributes), [attributes]);
   const attributeSignature = JSON.stringify(normalizedAttributes);
   const productName = productText.trim();
+  const inputSignature = JSON.stringify({accountId, attributeSignature, categoryId, maxLength, productName});
   const hasPositiveLimit = typeof maxLength === "number" && Number.isFinite(maxLength) && maxLength > 0;
   const canGenerate = Boolean(accountId && categoryId && productName && hasPositiveLimit);
 
   useEffect(() => {
+    requestGeneration.current += 1;
     setResult(null);
     setError("");
-  }, [accountId, attributeSignature, categoryId, maxLength, productName]);
+    setLoading(false);
+  }, [inputSignature]);
 
   async function generateTitle() {
     if (!canGenerate || !maxLength) return;
 
+    const generation = requestGeneration.current + 1;
+    requestGeneration.current = generation;
     setLoading(true);
     setError("");
     try {
@@ -68,12 +74,14 @@ export function TitleAssistant({
           max_length: maxLength,
         }),
       });
+      if (generation !== requestGeneration.current) return;
       setResult(response);
     } catch (requestError) {
+      if (generation !== requestGeneration.current) return;
       setResult(null);
       setError(requestError instanceof Error ? requestError.message : "No se pudo generar el título.");
     } finally {
-      setLoading(false);
+      if (generation === requestGeneration.current) setLoading(false);
     }
   }
 
