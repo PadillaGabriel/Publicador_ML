@@ -4,6 +4,7 @@ import {api, downloadFile, jobEvents} from "./api";
 import {PriceCalculator} from "./pricing/PriceCalculator";
 import {PricingProfileEditor} from "./pricing/PricingProfileEditor";
 import type {PricingCalculation, PricingProfile} from "./pricing/types";
+import {TitleAssistant} from "./title-intelligence/TitleAssistant";
 import "./styles.css";
 
 type Account = {
@@ -163,6 +164,7 @@ function App() {
   const [selectedCategoryName, setSelectedCategoryName] = useState("");
   const [commercialOptions, setCommercialOptions] = useState<CommercialOption[]>([]);
   const [categoryContractLoading, setCategoryContractLoading] = useState(false);
+  const [titleMaxLength, setTitleMaxLength] = useState<number | null>(null);
   const [accountId, setAccountId] = useState("");
   const [categoryId, setCategoryId] = useState("");
   const [fields, setFields] = useState<Field[]>([]);
@@ -350,6 +352,7 @@ function App() {
     setCategorySuggestions([]);
     setCommercialOptions([]);
     setCategoryContractLoading(false);
+    setTitleMaxLength(null);
     setFields([]);
     setRequirements([]);
     setProductIdentifierContract(null);
@@ -375,10 +378,12 @@ function App() {
       setCommercialOptions([]);
       setCommercialAllocations([]);
       setCategoryContractLoading(false);
+      setTitleMaxLength(null);
       setAttributes({});
       return () => { cancelled = true; };
     }
     setCategoryContractLoading(true);
+    setTitleMaxLength(null);
     setCommercialOptions([]);
     setRequirements([]);
     setProductIdentifierContract(null);
@@ -402,9 +407,15 @@ function App() {
         if (cancelled) return;
         const loadedFields: Field[] = meta.schema.fields || [];
         const loadedIdentifierContract = (meta.schema.product_identifier_contract || null) as ProductIdentifierContract | null;
+        const maxTitleLength = meta.schema?.settings?.max_title_length;
         setFields(loadedFields);
         setRequirements(meta.schema.requirements || []);
         setProductIdentifierContract(loadedIdentifierContract);
+        setTitleMaxLength(
+          typeof maxTitleLength === "number" && Number.isFinite(maxTitleLength) && maxTitleLength > 0
+            ? maxTitleLength
+            : null
+        );
 
         const availableCommercialOptions = listingResponse.options || [];
         setCommercialOptions(availableCommercialOptions);
@@ -451,7 +462,12 @@ function App() {
               : ""
         );
       })
-      .catch(e => { if (!cancelled) setMessage(e.message); })
+      .catch(e => {
+        if (!cancelled) {
+          setTitleMaxLength(null);
+          setMessage(e.message);
+        }
+      })
       .finally(() => { if (!cancelled) setCategoryContractLoading(false); });
 
     return () => { cancelled = true; };
@@ -1207,6 +1223,15 @@ function App() {
               </button>)}
             </div>
           </div>}
+
+          <TitleAssistant
+            accountId={accountId}
+            categoryId={categoryId}
+            productText={form.title || form.name}
+            attributes={currentProductAttributes()}
+            maxLength={titleMaxLength}
+            onUseTitle={(title) => setForm(current => ({...current, title}))}
+          />
         </section>
 
         <section className={`card ${!contextComplete ? "locked" : ""}`}>
