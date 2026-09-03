@@ -38,6 +38,7 @@ class CategoryTrendLookup:
     terms: tuple[str, ...]
     snapshot: KeywordTrendSnapshot | None
     cache_status: Literal["FRESH_HIT", "MISS_FETCHED", "STALE_FALLBACK", "UNAVAILABLE"]
+    failure_retryable: bool | None
 
 
 def _latest_trend_snapshot(db: Session, site_id: str, category_id: str) -> KeywordTrendSnapshot | None:
@@ -69,7 +70,7 @@ def get_category_trends(
             category_id,
             len(latest.terms),
         )
-        return CategoryTrendLookup(tuple(latest.terms), latest, "FRESH_HIT")
+        return CategoryTrendLookup(tuple(latest.terms), latest, "FRESH_HIT", None)
 
     logger.info("keyword_trends_fetch_started site=%s category=%s", site_id, category_id)
     try:
@@ -82,9 +83,9 @@ def get_category_trends(
                 category_id,
                 len(latest.terms),
             )
-            return CategoryTrendLookup(tuple(latest.terms), latest, "STALE_FALLBACK")
+            return CategoryTrendLookup(tuple(latest.terms), latest, "STALE_FALLBACK", None)
         logger.warning("keyword_trends_unavailable site=%s category=%s error=%s", site_id, category_id, exc)
-        return CategoryTrendLookup((), None, "UNAVAILABLE")
+        return CategoryTrendLookup((), None, "UNAVAILABLE", exc.retryable)
 
     terms = terms[: settings.keyword_max_trends]
     snapshot = KeywordTrendSnapshot(
@@ -103,7 +104,7 @@ def get_category_trends(
         category_id,
         len(terms),
     )
-    return CategoryTrendLookup(tuple(terms), snapshot, "MISS_FETCHED")
+    return CategoryTrendLookup(tuple(terms), snapshot, "MISS_FETCHED", None)
 
 
 def _fallback_snapshot(
@@ -169,10 +170,12 @@ def build_ml_keyword_snapshot(
         access_token=access_token,
     )
     if trend_lookup.snapshot is None:
+        if trend_lookup.failure_retryable is None:
+            raise AssertionError("unavailable trend lookup must include retryability")
         raise KeywordResearchError(
             "No se pudieron obtener las tendencias de Mercado Libre para esta categoría.",
             code="ML_KEYWORD_TRENDS_UNAVAILABLE",
-            retryable=True,
+            retryable=trend_lookup.failure_retryable,
         )
     trends = list(trend_lookup.terms)
     trend_snapshot = trend_lookup.snapshot

@@ -1,11 +1,15 @@
+from datetime import timedelta
 from uuid import uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.accounts import service as accounts_service
 from app.core.db import get_db
+from app.core.time import utcnow
 from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
 from app.main import app
+from app.persistence import KeywordTrendSnapshot
 from app.publication import router as publication_router
 
 
@@ -15,20 +19,30 @@ class _Account:
 
 
 class _Db:
-    def __init__(self, account: _Account | None = None) -> None:
+    def __init__(
+        self,
+        account: _Account | None = None,
+        snapshot: KeywordTrendSnapshot | None = None,
+    ) -> None:
         self.account = account
+        self.snapshot = snapshot
+        self.added = []
+        self.commits = 0
 
     def get(self, _model, _account_id):
         return self.account
 
     def scalar(self, _query):
-        return None
+        return self.snapshot
 
-    def add(self, _value) -> None:
-        pass
+    def add(self, value) -> None:
+        self.added.append(value)
 
     def flush(self) -> None:
         pass
+
+    def commit(self) -> None:
+        self.commits += 1
 
 
 class _PublicationSpy:
@@ -56,6 +70,19 @@ def _client(db: _Db) -> TestClient:
     return TestClient(app)
 
 
+_MISSING_OVERRIDE = object()
+
+
+@pytest.fixture(autouse=True)
+def _restore_get_db_override():
+    previous = app.dependency_overrides.get(get_db, _MISSING_OVERRIDE)
+    yield
+    if previous is _MISSING_OVERRIDE:
+        app.dependency_overrides.pop(get_db, None)
+    else:
+        app.dependency_overrides[get_db] = previous
+
+
 def test_generate_returns_factual_fallback_when_trends_are_unavailable(monkeypatch):
     """Catches an unavailable category-trends provider becoming an HTTP failure."""
     monkeypatch.setattr(accounts_service, "load_access_token", lambda *_: "token")
@@ -65,14 +92,63 @@ def test_generate_returns_factual_fallback_when_trends_are_unavailable(monkeypat
         lambda *_: (_ for _ in ()).throw(MercadoLibreError("provider unavailable")),
     )
 
-    response = _client(_Db(_Account())).post(
+    db = _Db(_Account())
+    response = _client(db).post(
         "/api/title-intelligence/generate", json=_payload()
     )
 
     assert response.status_code == 200
     assert response.json()["fallback_used"] is True
     assert response.json()["confidence"] == "FACTUAL_FALLBACK"
-    app.dependency_overrides.clear()
+    assert db.commits == 0
+    assert db.added == []
+
+
+def test_generate_commits_only_a_newly_fetched_trend_snapshot(monkeypatch):
+    """Catches a fetched trend snapshot being rolled back when the request closes."""
+    db = _Db(_Account())
+    monkeypatch.setattr(accounts_service, "load_access_token", lambda *_: "token")
+    monkeypatch.setattr(
+        MercadoLibreClient,
+        "category_trends",
+        lambda *_: ["cesto ropa sucia"],
+    )
+
+    response = _client(db).post(
+        "/api/title-intelligence/generate", json=_payload()
+    )
+
+    assert response.status_code == 200
+    assert db.commits == 1
+    assert len(db.added) == 1
+    assert isinstance(db.added[0], KeywordTrendSnapshot)
+
+
+def test_generate_does_not_commit_a_fresh_trend_hit(monkeypatch):
+    """Catches read-only cache hits acquiring a write transaction boundary."""
+    now = utcnow()
+    snapshot = KeywordTrendSnapshot(
+        site_id="MLA",
+        category_id="MLA412517",
+        terms=["cesto ropa sucia"],
+        fetched_at=now,
+        expires_at=now + timedelta(hours=1),
+    )
+    db = _Db(_Account(), snapshot)
+    monkeypatch.setattr(accounts_service, "load_access_token", lambda *_: "token")
+    monkeypatch.setattr(
+        MercadoLibreClient,
+        "category_trends",
+        lambda *_: (_ for _ in ()).throw(AssertionError("fresh cache must not fetch")),
+    )
+
+    response = _client(db).post(
+        "/api/title-intelligence/generate", json=_payload()
+    )
+
+    assert response.status_code == 200
+    assert db.commits == 0
+    assert db.added == []
 
 
 def test_generate_response_has_the_stable_recommendation_shape(monkeypatch):
@@ -103,7 +179,6 @@ def test_generate_response_has_the_stable_recommendation_shape(monkeypatch):
     assert body["confidence"] == "TREND_SUPPORTED"
     assert body["matched_trends"] == ["cesto ropa sucia"]
     assert body["fallback_used"] is False
-    app.dependency_overrides.clear()
 
 
 def test_generate_has_no_publication_side_effect(monkeypatch):
@@ -119,7 +194,6 @@ def test_generate_has_no_publication_side_effect(monkeypatch):
 
     assert response.status_code == 200
     assert publication.calls == 0
-    app.dependency_overrides.clear()
 
 
 def test_generate_rejects_a_nonpositive_max_length():
@@ -129,7 +203,6 @@ def test_generate_rejects_a_nonpositive_max_length():
     )
 
     assert response.status_code == 422
-    app.dependency_overrides.clear()
 
 
 def test_generate_preserves_the_established_missing_account_404():
@@ -138,4 +211,3 @@ def test_generate_preserves_the_established_missing_account_404():
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Cuenta de Mercado Libre no encontrada."
-    app.dependency_overrides.clear()

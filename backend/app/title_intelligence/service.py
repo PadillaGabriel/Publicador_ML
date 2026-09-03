@@ -22,6 +22,8 @@ def generate_title_recommendation(
         category_id=payload.category_id,
         access_token=access_token,
     )
+    if trend_lookup.cache_status == "MISS_FETCHED":
+        db.commit()
     trends = () if trend_lookup.cache_status == "UNAVAILABLE" else trend_lookup.terms
     recommendation = recommend_title(
         ProductTitleContext(

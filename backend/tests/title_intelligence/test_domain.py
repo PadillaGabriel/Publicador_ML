@@ -1,5 +1,6 @@
 import pytest
 
+from app.title_intelligence import domain
 from app.title_intelligence.domain import (
     ProductTitleContext,
     TitleConstraints,
@@ -166,3 +167,36 @@ def test_recommendation_uses_generic_attributes_without_an_unsupported_connector
     assert any("AZUL" in candidate for candidate in candidates)
     assert any("TELA" in candidate for candidate in candidates)
     assert result.fallback_used is True
+
+
+def test_recommendation_bounds_candidate_work_with_fifty_factual_attributes(monkeypatch):
+    """Catches a return to combinatorial subset enumeration for large factual inputs."""
+    real_complete_title = domain._complete_title
+    complete_title_calls = 0
+
+    def bounded_complete_title(terms, max_length):
+        nonlocal complete_title_calls
+        complete_title_calls += 1
+        if complete_title_calls > 600:
+            raise AssertionError("candidate generation exceeded its bounded work budget")
+        return real_complete_title(terms, max_length)
+
+    monkeypatch.setattr(domain, "_complete_title", bounded_complete_title)
+    attributes = {
+        f"attribute_{index:02d}": f"value{index:02d}"
+        for index in range(50)
+    }
+    context = ProductTitleContext(
+        category_id="MLA1",
+        product_name="Caja",
+        attributes=attributes,
+    )
+
+    result = recommend_title(context, (), TitleConstraints(max_length=15))
+    candidates = (result.recommended_title, *result.alternatives)
+    factual_words = {"CAJA", *(value.upper() for value in attributes.values())}
+
+    assert complete_title_calls <= 600
+    assert 1 <= len(candidates) <= 10
+    assert all(len(candidate) <= 15 for candidate in candidates)
+    assert all(set(candidate.split()) <= factual_words for candidate in candidates)

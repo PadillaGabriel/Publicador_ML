@@ -46,6 +46,8 @@ class MercadoLibreClient:
                 response = client.get(path)
         except httpx.TimeoutException as exc:
             raise MercadoLibreError("Mercado Libre request timed out.") from exc
+        except httpx.RequestError as exc:
+            raise MercadoLibreError("Mercado Libre request failed.") from exc
         self._raise(response)
         return response.json()
 
@@ -59,6 +61,8 @@ class MercadoLibreClient:
                 response = client.post(path, json=payload)
         except httpx.TimeoutException as exc:
             raise MercadoLibreError("Mercado Libre publish request timed out.") from exc
+        except httpx.RequestError as exc:
+            raise MercadoLibreError("Mercado Libre publish request failed.") from exc
         if response.is_error:
             body = self._safe_json(response)
             raise MercadoLibreError(

@@ -1,6 +1,5 @@
 import re
 from dataclasses import dataclass
-from itertools import combinations
 
 from app.keywords.relevance import content_tokens, normalize_text
 
@@ -101,24 +100,36 @@ def _arrangements(terms: list[str]) -> tuple[tuple[str, ...], ...]:
     if len(terms) < 2:
         return (tuple(terms),)
     arrangements = [tuple(terms)]
-    arrangements.extend(tuple(terms[offset:] + terms[:offset]) for offset in range(1, len(terms)))
+    arrangements.extend(
+        tuple(terms[offset:] + terms[:offset])
+        for offset in range(1, min(len(terms), 9))
+    )
     arrangements.append(tuple(reversed(terms)))
     return tuple(dict.fromkeys(arrangements))
 
 
+def _fitting_title(terms: tuple[str, ...], max_length: int) -> str | None:
+    selected: list[str] = []
+    candidate: str | None = None
+    for term in terms:
+        next_candidate = _complete_title([*selected, term], max_length)
+        if next_candidate is None:
+            if selected:
+                break
+            continue
+        selected.append(term)
+        candidate = next_candidate
+    return candidate
+
+
 def _factual_candidates(terms: list[str], max_length: int) -> tuple[str, ...]:
     candidates: list[str] = []
-    for size in range(len(terms), 0, -1):
-        for indexes in combinations(range(len(terms)), size):
-            subset = [terms[index] for index in indexes]
-            for arrangement in _arrangements(subset):
-                candidate = _complete_title(list(arrangement), max_length)
-                if candidate and candidate not in candidates:
-                    candidates.append(candidate)
-                    if len(candidates) == 10:
-                        return tuple(candidates)
-        if candidates:
-            return tuple(candidates)
+    for arrangement in _arrangements(terms):
+        candidate = _fitting_title(arrangement, max_length)
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+            if len(candidates) == 10:
+                break
     return tuple(candidates)
 
 
