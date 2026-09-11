@@ -1,11 +1,13 @@
-"""Local process supervisor for the API and publication worker.
+"""Process supervisor for the API and publication worker.
 
 One command starts both durable roles without coupling the worker lifecycle to
-FastAPI startup hooks. Production can still supervise the two processes separately.
+FastAPI startup hooks. The API binds to ``0.0.0.0:$PORT`` when deployed and
+falls back to port 8000 for local development.
 """
 from __future__ import annotations
 
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -19,7 +21,8 @@ def _start(module: str, *args: str) -> subprocess.Popen:
 
 
 def run() -> None:
-    api = _start("uvicorn", "app.main:app", "--reload", "--host", "127.0.0.1", "--port", "8000")
+    port = os.getenv("PORT", "8000").strip() or "8000"
+    api = _start("uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", port)
     worker = _start("app.worker")
     logger.info("backend_supervisor_started api_pid=%s worker_pid=%s", api.pid, worker.pid)
     try:

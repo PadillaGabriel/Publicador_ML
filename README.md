@@ -189,7 +189,7 @@ python -m app.run
 
 `python -m app.worker` queda reservado para diagnóstico o para despliegues donde la infraestructura supervise ese rol por separado. La UI consulta un heartbeat persistido en PostgreSQL: `WAITING_WORKER` significa que existe un consumidor activo; `WORKER_OFFLINE` significa que el job está durablemente en cola pero no hay un worker disponible. El progreso usa SSE y cambia automáticamente a polling si el stream se interrumpe.
 
-Para publicación live local, las imágenes deben ser accesibles por HTTPS desde Mercado Libre. Configurá `APP_PUBLIC_BASE_URL` con el origen público del backend (por ejemplo, el dominio HTTPS de ngrok). Si no se configura, el backend intenta derivarlo del origen de `ML_REDIRECT_URI`. Nunca uses `localhost` como origen de imágenes live.
+La publicación live sube cada imagen directamente a Mercado Libre mediante `/pictures/items/upload` y luego crea el ítem con los `picture_id` devueltos. Ya no depende de URLs públicas propias ni de ngrok para la ingestión de imágenes.
 
 `ML_LIVE_PUBLICATION_ENABLED=false` sigue siendo el valor seguro por defecto. La grilla permite seleccionar explícitamente qué drafts `APPROVED` entran al job; no es necesario publicar todo el batch.
 
@@ -218,7 +218,7 @@ En desarrollo local no es necesario abrir una terminal separada para el worker. 
 python -m app.run
 ```
 
-El supervisor inicia FastAPI y el worker de publicación, reinicia el worker si termina inesperadamente y apaga ambos procesos en conjunto. En producción deben seguir desplegados como roles/procesos independientes bajo el supervisor de la plataforma.
+El supervisor inicia FastAPI y el worker de publicación, reinicia el worker si termina inesperadamente y apaga ambos procesos en conjunto. En el despliegue single-service de Render, este mismo supervisor mantiene ambos roles dentro del modular monolith.
 
 ### Distribución comercial
 
@@ -231,3 +231,70 @@ La evidencia live de la cuenta utilizada en Discovery primero exigió `family_na
 ## Publication data integrity (V1.21)
 
 Live publication now validates product identifiers and image dimensions before enqueueing, supports local pickup and seller warranty as structured product-version configuration, synchronizes descriptions after item creation, and exports publication timestamps using `APP_TIMEZONE`. Image policy values are configurable with `ML_IMAGE_MIN_SIDE_PX`, `ML_IMAGE_RECOMMENDED_SIDE_PX` and `ML_IMAGE_ALLOWED_FORMATS_CSV`.
+
+## Deploy en Render — un único Web Service
+
+El despliegue productivo recomendado para esta versión mantiene el **modular monolith** en un solo Web Service de Render:
+
+```text
+Render Web Service
+├── FastAPI
+├── publication worker
+└── React/Vite compilado y servido por FastAPI
+        ↓
+PostgreSQL externo
+```
+
+El `Dockerfile` de la raíz usa un build multistage: Node compila `frontend/dist` y la imagen final contiene sólo Python, el backend y los estáticos compilados. `python -m app.run` sigue siendo el único supervisor de runtime y escucha en `0.0.0.0:$PORT`, como requiere Render.
+
+Configuración del servicio en Render:
+
+```text
+Language / Runtime: Docker
+Dockerfile Path: ./Dockerfile
+Health Check Path: /health
+Persistent Disk: ninguno
+```
+
+El contenedor ejecuta automáticamente `python -m alembic upgrade head` antes de iniciar el supervisor.
+
+### Variables de entorno mínimas en Render
+
+No subir `.env` al repositorio. Configurar los secretos desde el dashboard de Render:
+
+```env
+APP_ENV=production
+APP_SECRET_KEY=<secreto largo y aleatorio>
+APP_ENCRYPTION_KEY=<clave Fernet>
+DATABASE_URL=<postgresql+psycopg://...>
+FRONTEND_URL=https://<servicio>.onrender.com
+CORS_ORIGINS=https://<servicio>.onrender.com
+ML_CLIENT_ID=<...>
+ML_CLIENT_SECRET=<...>
+ML_REDIRECT_URI=https://<servicio>.onrender.com/api/accounts/oauth/callback
+ML_LIVE_PUBLICATION_ENABLED=true
+OPENAI_API_KEY=<...>
+OPENAI_MODEL=<modelo configurado>
+HF_TOKEN=<opcional pero recomendado>
+```
+
+`PORT` lo provee Render y no debe fijarse manualmente. El frontend usa el mismo origen que FastAPI en producción, por lo que no necesita `VITE_API_URL` en Render.
+
+Para generar `APP_ENCRYPTION_KEY` localmente:
+
+```powershell
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+```
+
+### Uploads temporales
+
+Render no usa Persistent Disk para imágenes. El contenedor configura:
+
+```text
+UPLOAD_DIR=/tmp/ml-enterprise/uploads
+CLEANUP_UPLOADS_AFTER_SUCCESS=true
+```
+
+Las imágenes se guardan sólo mientras se prepara/publica el lote. El worker las sube directamente a Mercado Libre mediante `/pictures/items/upload`; cuando un job termina completamente en `COMPLETED`, elimina los bytes locales y conserva únicamente la metadata de auditoría en PostgreSQL. Los jobs `FAILED` o `PARTIAL` conservan temporalmente los archivos para permitir correcciones y reintentos mientras la instancia siga viva.
+
+Como el filesystem de Render es efímero, un restart o redeploy puede descartar uploads pendientes. Las imágenes originales deben conservarse fuera del servicio, por ejemplo en la PC del operador.

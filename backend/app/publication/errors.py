@@ -131,3 +131,69 @@ def format_publication_error(value: dict | None) -> str:
     if cause_parts:
         return " | ".join([headline, *cause_parts]) if headline else " | ".join(cause_parts)
     return headline or str(value)
+
+
+def provider_validation_issues(payload: dict, normalized_schema: dict) -> list[dict]:
+    """Translate Mercado Libre validation causes without hardcoding category rules."""
+
+    raw_causes = payload.get("cause") or payload.get("causes") or []
+    causes = raw_causes if isinstance(raw_causes, list) else []
+    fields = normalized_schema.get("fields") or []
+    fields_by_id = {
+        str(field.get("id")): field
+        for field in fields
+        if isinstance(field, dict) and field.get("id")
+    }
+
+    issues: list[dict] = []
+    for cause in causes:
+        if not isinstance(cause, dict):
+            continue
+        cause_type = str(cause.get("type") or "").strip().casefold()
+        if cause_type == "warning":
+            continue
+
+        code = str(cause.get("code") or payload.get("error") or "MERCADOLIBRE_VALIDATION_ERROR")
+        provider_message = str(cause.get("message") or payload.get("message") or "Validation error").strip()
+        provider_field = cause.get("field")
+
+        matched_attribute_id = next(
+            (
+                attribute_id
+                for attribute_id in fields_by_id
+                if f"[{attribute_id}]" in provider_message
+            ),
+            None,
+        )
+        field = str(provider_field) if provider_field else None
+        message = provider_message
+        if matched_attribute_id:
+            metadata = fields_by_id[matched_attribute_id]
+            label = str(metadata.get("label") or matched_attribute_id)
+            field = f"attributes.{matched_attribute_id}"
+            if code == "item.attribute.missing_conditional_required":
+                message = f"Mercado Libre requiere completar {label} para esta publicación."
+
+        issues.append(
+            {
+                "code": code,
+                "field": field,
+                "message": message,
+                "provider_message": provider_message,
+            }
+        )
+
+    if issues:
+        return issues
+    if causes:
+        return []
+
+    message = str(payload.get("message") or "Mercado Libre rechazó la validación previa de la publicación.")
+    return [
+        {
+            "code": str(payload.get("error") or "MERCADOLIBRE_VALIDATION_ERROR"),
+            "field": None,
+            "message": message,
+            "provider_message": message,
+        }
+    ]

@@ -1,9 +1,28 @@
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from decimal import Decimal
 from types import MappingProxyType
+from typing import Protocol
 
-from app.persistence import PricingProfile
+
+class PricingCostComponentSource(Protocol):
+    name: str
+    kind: str
+    value: Decimal
+    basis: str
+    active: bool
+
+
+class PricingProfileSource(Protocol):
+    target_margin_pct: Decimal
+    minimum_margin_pct: Decimal
+    rounding_step: Decimal
+    monthly_units_projection: int | None
+    vat_rate_pct: Decimal
+    iibb_rate_pct: Decimal
+    ads_rate_pct: Decimal
+    refund_rate_pct: Decimal
+    components: Iterable[PricingCostComponentSource]
 
 
 @dataclass(frozen=True, slots=True)
@@ -25,7 +44,7 @@ class EffectiveEconomicParameters:
 
 
 def resolve_effective_economic_parameters(
-    profile: PricingProfile,
+    profile: PricingProfileSource,
     overrides: Mapping[str, Decimal | None],
 ) -> EffectiveEconomicParameters:
     fields = (

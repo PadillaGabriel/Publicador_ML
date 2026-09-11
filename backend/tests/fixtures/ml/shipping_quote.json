@@ -1,0 +1,14 @@
+{
+  "coverage": {
+    "all_country": {
+      "list_cost": 120,
+      "currency_id": "ARS",
+      "billable_weight": 5828,
+      "discount": {
+        "rate": 0.4,
+        "type": "mandatory",
+        "promoted_amount": 200
+      }
+    }
+  }
+}

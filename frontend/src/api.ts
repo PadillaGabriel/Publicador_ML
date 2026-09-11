@@ -1,5 +1,8 @@
-export const BASE =
-  import.meta.env.VITE_API_URL || "http://localhost:8000";
+import type { ShippingCapabilities } from "./pricing/types";
+
+const configuredBase = (import.meta.env.VITE_API_URL || "").trim();
+
+export const BASE = configuredBase || (import.meta.env.DEV ? "http://localhost:8000" : "");
 
 function apiErrorMessage(body: any, status: number): string {
   const detail = body?.detail;
@@ -121,4 +124,12 @@ export async function downloadFile(
   } finally {
     URL.revokeObjectURL(url);
   }
+}
+export function loadShippingCapabilities(
+  accountId: string,
+  categoryId: string
+): Promise<ShippingCapabilities> {
+  return api<ShippingCapabilities>(
+    `/api/publication/shipping-options?account_id=${encodeURIComponent(accountId)}&category_id=${encodeURIComponent(categoryId)}`
+  );
 }

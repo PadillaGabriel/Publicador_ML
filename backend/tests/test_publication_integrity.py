@@ -35,7 +35,14 @@ def test_payload_includes_pickup_and_seller_warranty_contract():
             "buying_mode": "buy_it_now",
             "warranty": {"type": "SELLER", "duration": 30, "unit": "days"},
         },
-        logistics={"local_pick_up": True},
+        logistics={
+            "local_pick_up": True,
+            "pricing_package": {
+                "logistic_type": "drop_off",
+                "shipping_mode": "me2",
+                "free_shipping": False,
+            },
+        },
         condition="new",
         attributes={},
     )
@@ -51,7 +58,12 @@ def test_payload_includes_pickup_and_seller_warranty_contract():
         seller_sku="SKU-TEST-001",
     )
 
-    assert payload["shipping"] == {"local_pick_up": True}
+    assert payload["shipping"] == {
+        "mode": "me2",
+        "logistic_type": "drop_off",
+        "local_pick_up": True,
+        "free_shipping": False,
+    }
     assert payload["sale_terms"] == [
         {"id": "WARRANTY_TYPE", "value_name": "Garantía del vendedor"},
         {"id": "WARRANTY_TIME", "value_name": "30 días"},
@@ -85,6 +97,8 @@ def test_payload_requires_and_normalizes_seller_sku():
     )
 
     assert payload["seller_custom_field"] == "SKU-123"
+    seller_sku = [row for row in payload["attributes"] if row["id"] == "SELLER_SKU"]
+    assert seller_sku == [{"id": "SELLER_SKU", "value_name": "SKU-123"}]
 
 
 def test_excel_datetime_is_converted_to_naive_business_timezone():
@@ -121,3 +135,30 @@ def test_all_guarded_empty_gtin_reason_ids_are_stable():
     assert [value["id"] for value in EMPTY_GTIN_REASON_FALLBACK_VALUES] == [
         "17055158", "17055159", "17055160", "17055161"
     ]
+
+
+def test_payload_accepts_mercadolibre_picture_ids_without_treating_them_as_urls():
+    version = SimpleNamespace(
+        title_reference="Producto",
+        category_id="MLA1",
+        price=1000,
+        currency_id="ARS",
+        quantity=1,
+        commercial={"buying_mode": "buy_it_now"},
+        logistics={},
+        condition="new",
+        attributes={},
+    )
+    draft = SimpleNamespace(
+        title="Producto prueba",
+        commercial_config={"listing_type_id": "gold_special"},
+    )
+
+    payload = build_item_payload(
+        version,
+        draft,
+        [{"id": "123-MLA456_092026"}],
+        seller_sku="SKU-123",
+    )
+
+    assert payload["pictures"] == [{"id": "123-MLA456_092026"}]

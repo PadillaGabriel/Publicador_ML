@@ -1,6 +1,0 @@
-Eliminar después de aplicar este incremental:
-
-backend/app/drafts/installments.py
-backend/tests/test_installments.py
-
-Estos archivos pertenecen al modelo anterior de cuotas fijas 1/3/6/9/12 y ya no tienen responsabilidades válidas en V1.20.

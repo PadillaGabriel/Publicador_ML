@@ -1,16 +1,40 @@
+# Environment
 .env
+.env.*
+!.env.example
 .venv/
-.worktrees/
-.superpowers/
-__pycache__/
-*.pyc
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
 backend/.venv/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+*.egg-info/
+
+# Frontend
 frontend/node_modules/
 frontend/dist/
 *.tsbuildinfo
-*.egg-info/
+
+# Worktrees / temp
+.worktrees/
+.superpowers/
+tmp/
+temp/
+
+# Packaging output
+artifacts/
+
+# Runtime data
 uploads/
+
+# Logs
+*.log
+
+# OS
 .DS_Store
+Thumbs.db

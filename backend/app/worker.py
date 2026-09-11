@@ -1,6 +1,7 @@
 import logging
 import time
 import uuid
+from pathlib import Path
 
 from sqlalchemy import select
 
@@ -16,6 +17,7 @@ from app.persistence import (
 from app.publication.errors import build_mercadolibre_error
 from app.publication.payload import build_item_payload, publication_title_intent
 from app.publication.quantity_pricing import normalize_b2b_quantity_prices, sync_b2b_quantity_prices
+from app.products.storage import cleanup_temporary_product_images
 from app.worker_runtime import heartbeat_worker, register_worker, unregister_worker
 
 logging.basicConfig(level=logging.INFO)
@@ -42,17 +44,14 @@ def claim_job():
         return job_id
 
 
-def image_urls_for_worker(version: ProductVersion, draft: PublicationDraft) -> list[str]:
-    configured = (version.logistics or {}).get("public_image_base_url", "").strip().rstrip("/")
-    root = configured or settings.public_base_url
-    if not root.startswith("https://"):
-        return []
-    image_base = root if configured else f"{root}/uploads"
-    images = {str(img.id): img for img in version.images}
+def ordered_images_for_worker(version: ProductVersion, draft: PublicationDraft) -> list:
+    """Return persisted product images in the exact draft publication order."""
+
+    images = {str(image.id): image for image in version.images}
     return [
-        f"{image_base}/{image_id}"
+        image
         for image_id in draft.image_order
-        if str(image_id) in images
+        if (image := images.get(str(image_id))) is not None
     ]
 
 
@@ -265,11 +264,11 @@ def process_item_once(item_id: uuid.UUID) -> tuple[bool, bool]:
             version.category_id,
         )
 
-        image_urls = image_urls_for_worker(version, draft)
+        ordered_images = ordered_images_for_worker(version, draft)
         payload = build_item_payload(
             version,
             draft,
-            image_urls,
+            [],
             seller_sku=version.master.internal_sku,
         )
         attempt = PublicationAttempt(
@@ -292,36 +291,57 @@ def process_item_once(item_id: uuid.UUID) -> tuple[bool, bool]:
                 message="Live publication is disabled by configuration.",
             )
 
-        if not image_urls:
+        if not ordered_images:
             return _fail_without_retry(
                 db,
                 item=item,
                 draft=draft,
                 attempt=attempt,
-                outcome="MISSING_PUBLIC_IMAGE_URLS",
-                code="PUBLIC_IMAGE_URL_REQUIRED",
-                message=(
-                    "La publicación live necesita una URL HTTPS pública para las imágenes. "
-                    "Configurá APP_PUBLIC_BASE_URL o una ML_REDIRECT_URI pública válida."
-                ),
+                outcome="MISSING_IMAGES",
+                code="PUBLICATION_IMAGES_REQUIRED",
+                message="La publicación live necesita al menos una imagen guardada en el producto.",
+            )
+
+        missing_files = [image.original_name for image in ordered_images if not Path(image.storage_path).is_file()]
+        if missing_files:
+            return _fail_without_retry(
+                db,
+                item=item,
+                draft=draft,
+                attempt=attempt,
+                outcome="MISSING_IMAGE_FILES",
+                code="PUBLICATION_IMAGE_FILE_MISSING",
+                message=f"No se encuentran {len(missing_files)} archivos de imagen guardados localmente.",
             )
 
         token = load_access_token(db, batch.account_id)
         client = MercadoLibreClient(token)
 
-        # Persist a durable checkpoint before the external side effect. The SSE endpoint
-        # can now report that this draft is actively being sent to Mercado Libre.
+        # Persist a durable checkpoint before external side effects.
         db.commit()
-        logger.info(
-            "publication_request_started draft=%s sequence=%d images=%d payload_fields=%s commercial_intent=%s",
-            draft.id,
-            draft.sequence_number,
-            len(image_urls),
-            sorted(payload.keys()),
-            (draft.commercial_config or {}).get("commercial_intent"),
-        )
 
         try:
+            uploaded_picture_ids = [
+                str(client.upload_item_picture(image.storage_path, image.mime_type)["id"])
+                for image in ordered_images
+            ]
+            payload = build_item_payload(
+                version,
+                draft,
+                [{"id": picture_id} for picture_id in uploaded_picture_ids],
+                seller_sku=version.master.internal_sku,
+            )
+            attempt = db.get(PublicationAttempt, attempt.id)
+            attempt.request_payload = payload
+            db.commit()
+            logger.info(
+                "publication_request_started draft=%s sequence=%d images=%d payload_fields=%s commercial_intent=%s",
+                draft.id,
+                draft.sequence_number,
+                len(uploaded_picture_ids),
+                sorted(payload.keys()),
+                (draft.commercial_config or {}).get("commercial_intent"),
+            )
             response = client.create_item(payload)
             attempt = db.get(PublicationAttempt, attempt.id)
             item = db.get(JobItem, item.id)
@@ -482,13 +502,37 @@ def process_job(job_id: uuid.UUID, *, worker_instance_id: uuid.UUID):
             job.status = JobStatus.PARTIAL
         else:
             job.status = JobStatus.FAILED
+
+        deleted_files = 0
+        deleted_bytes = 0
+        if job.status == JobStatus.COMPLETED and settings.cleanup_uploads_after_success:
+            version_ids = db.scalars(
+                select(DraftBatch.product_version_id)
+                .join(PublicationDraft, PublicationDraft.batch_id == DraftBatch.id)
+                .join(JobItem, JobItem.draft_id == PublicationDraft.id)
+                .where(JobItem.job_id == job.id)
+                .distinct()
+            ).all()
+            for version_id in version_ids:
+                version = db.get(ProductVersion, version_id)
+                if version is None:
+                    continue
+                removed_count, removed_bytes = cleanup_temporary_product_images(
+                    version.images, settings.upload_dir
+                )
+                deleted_files += removed_count
+                deleted_bytes += removed_bytes
+
         db.commit()
         logger.info(
-            "publication_job_finished job=%s status=%s succeeded=%d failed=%d",
+            "publication_job_finished job=%s status=%s succeeded=%d failed=%d "
+            "temporary_uploads_deleted=%d temporary_upload_bytes_deleted=%d",
             job.id,
             job.status,
             job.succeeded,
             job.failed,
+            deleted_files,
+            deleted_bytes,
         )
 
 
@@ -497,11 +541,10 @@ def run():
     with SessionLocal() as db:
         register_worker(db, instance_id=instance_id)
     logger.info(
-        "publication_worker_started instance=%s poll_seconds=%.1f live_enabled=%s public_base_configured=%s",
+        "publication_worker_started instance=%s poll_seconds=%.1f live_enabled=%s",
         instance_id,
         settings.worker_poll_seconds,
         settings.ml_live_publication_enabled,
-        bool(settings.public_base_url),
     )
     try:
         while True:

@@ -2,6 +2,7 @@ from functools import lru_cache
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +40,7 @@ class Settings(BaseSettings):
     ml_live_publication_enabled: bool = False
 
     keyword_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+    hf_token: str = ""
     keyword_max_trends: int = 50
     keyword_max_selected_terms: int = 12
     keyword_min_semantic_similarity: float = 0.35
@@ -48,7 +50,9 @@ class Settings(BaseSettings):
     openai_request_timeout_seconds: float = 45.0
 
     upload_dir: Path = Path("./uploads")
+    frontend_dist_dir: Path = PROJECT_ROOT / "frontend" / "dist"
     max_upload_bytes: int = 10 * 1024 * 1024
+    cleanup_uploads_after_success: bool = False
     ml_image_min_side_px: int = 500
     ml_image_recommended_side_px: int = 1200
     ml_image_allowed_formats_csv: str = "JPEG,JPG,PNG"
@@ -58,6 +62,17 @@ class Settings(BaseSettings):
     worker_base_backoff_seconds: float = 2.0
     worker_heartbeat_stale_seconds: float = 30.0
 
+
+
+    @field_validator("database_url", mode="before")
+    @classmethod
+    def normalize_database_url(cls, value: str) -> str:
+        raw = str(value or "").strip()
+        if raw.startswith("postgres://"):
+            return "postgresql+psycopg://" + raw.removeprefix("postgres://")
+        if raw.startswith("postgresql://"):
+            return "postgresql+psycopg://" + raw.removeprefix("postgresql://")
+        return raw
 
     @property
     def ml_image_allowed_formats(self) -> set[str]:

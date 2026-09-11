@@ -1,6 +1,8 @@
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
 from app.integrations.mercadolibre.product_identifiers import is_product_identifier, normalized_identifier_value
+from app.publication.shipping import publication_shipping_payload
 
 if TYPE_CHECKING:
     from app.persistence import ProductVersion, PublicationDraft
@@ -40,6 +42,21 @@ def attribute_payload(attributes: dict) -> list[dict]:
     return result
 
 
+def ordered_image_urls(
+    version: ProductVersion,
+    draft: PublicationDraft,
+    resolve_image_url: Callable[[str], str],
+) -> list[str]:
+    """Resolve draft image order to public URLs used by ML create/preflight payloads."""
+
+    images = {str(image.id): image for image in version.images}
+    return [
+        resolve_image_url(str(image.id))
+        for image_id in draft.image_order
+        if (image := images.get(str(image_id))) is not None
+    ]
+
+
 def publication_title_intent(draft: PublicationDraft) -> str:
     """Return the independent title chosen for this publication draft.
 
@@ -75,13 +92,34 @@ def family_name_for_version(version: ProductVersion) -> str:
 def build_item_payload(
     version: ProductVersion,
     draft: PublicationDraft,
-    image_urls: list[str],
+    pictures: list[str | dict],
     *,
     seller_sku: str,
 ) -> dict:
     normalized_sku = seller_sku.strip()
     if not normalized_sku:
         raise ValueError("seller_sku is required to build a Mercado Libre item payload.")
+
+    normalized_attributes = dict(getattr(version, "attributes", None) or {})
+    normalized_attributes["SELLER_SKU"] = normalized_sku
+
+    picture_payload: list[dict] = []
+    for picture in pictures:
+        if isinstance(picture, str):
+            source = picture.strip()
+            if source:
+                picture_payload.append({"source": source})
+            continue
+        if not isinstance(picture, dict):
+            raise ValueError("pictures must contain Mercado Libre picture ids or source URLs.")
+        picture_id = str(picture.get("id") or "").strip()
+        source = str(picture.get("source") or "").strip()
+        if picture_id:
+            picture_payload.append({"id": picture_id})
+        elif source:
+            picture_payload.append({"source": source})
+        else:
+            raise ValueError("Each picture requires either id or source.")
 
     payload: dict = {
         # Deliberately omit ``title``: the live create contract rejected it when
@@ -94,16 +132,17 @@ def build_item_payload(
         "buying_mode": version.commercial.get("buying_mode", "buy_it_now"),
         "condition": version.condition,
         "seller_custom_field": normalized_sku,
-        "attributes": attribute_payload(version.attributes),
-        "pictures": [{"source": url} for url in image_urls],
+        "attributes": attribute_payload(normalized_attributes),
+        "pictures": picture_payload,
     }
     resolved_listing_type = (draft.commercial_config or {}).get("listing_type_id")
     if resolved_listing_type:
         payload["listing_type_id"] = resolved_listing_type
 
     logistics = getattr(version, "logistics", None) or {}
-    if "local_pick_up" in logistics:
-        payload["shipping"] = {"local_pick_up": bool(logistics.get("local_pick_up"))}
+    shipping = publication_shipping_payload(logistics)
+    if shipping is not None:
+        payload["shipping"] = shipping
 
     warranty = (getattr(version, "commercial", None) or {}).get("warranty") or {}
     warranty_type = str(warranty.get("type") or "").strip().upper()

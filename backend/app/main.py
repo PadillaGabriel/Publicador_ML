@@ -10,6 +10,7 @@ from app.catalog.router import router as catalog_router
 from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.core.logging import configure_logging
+from app.core.static_frontend import mount_static_frontend
 from app.drafts.router import router as drafts_router
 from app.jobs import router as jobs_router
 from app.persistence import ProductImage
@@ -60,7 +61,13 @@ def serve_upload(image_id: uuid.UUID):
         image = db.get(ProductImage, image_id)
         if not image:
             raise HTTPException(status_code=404, detail="Image not found.")
-        path = Path(image.storage_path)
-        if not path.exists():
+        storage_path = str(image.storage_path or "").strip()
+        if not storage_path:
+            raise HTTPException(status_code=404, detail="Stored image file not found.")
+        path = Path(storage_path)
+        if not path.is_file():
             raise HTTPException(status_code=404, detail="Stored image file not found.")
         return FileResponse(path, media_type=image.mime_type)
+
+
+mount_static_frontend(app, settings.frontend_dist_dir)

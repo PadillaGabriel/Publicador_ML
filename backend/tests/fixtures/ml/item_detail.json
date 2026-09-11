@@ -3,6 +3,7 @@
   "price": 17745.05,
   "currency_id": "ARS",
   "listing_type_id": "gold_special",
+  "condition": "new",
   "shipping": {
     "mode": "me2",
     "methods": [],
@@ -14,5 +15,11 @@
     "free_shipping": false,
     "logistic_type": "cross_docking",
     "store_pick_up": false
-  }
+  },
+  "attributes": [
+    {"id": "SELLER_PACKAGE_HEIGHT", "value_struct": {"number": 6, "unit": "cm"}},
+    {"id": "SELLER_PACKAGE_WIDTH", "value_struct": {"number": 25, "unit": "cm"}},
+    {"id": "SELLER_PACKAGE_LENGTH", "value_struct": {"number": 31, "unit": "cm"}},
+    {"id": "SELLER_PACKAGE_WEIGHT", "value_struct": {"number": 214, "unit": "g"}}
+  ]
 }

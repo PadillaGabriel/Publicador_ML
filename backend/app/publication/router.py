@@ -8,14 +8,25 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.audit.service import audit
 from app.accounts.service import load_access_token
+from app.audit.service import audit
 from app.core.db import get_db
 from app.core.enums import DraftStatus, JobItemStatus, JobStatus
-from app.persistence import DraftBatch, Job, JobItem, MercadoLibreAccount, ProductVersion, Publication, PublicationDraft
+from app.persistence import (
+    DraftBatch,
+    Job,
+    JobItem,
+    MercadoLibreAccount,
+    ProductVersion,
+    Publication,
+    PublicationDraft,
+)
 from app.publication.commercial import fetch_commercial_options
 from app.publication.export import build_job_export_xlsx
-from app.publication.payload import build_item_payload
+from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
+from app.publication.payload import build_item_payload, ordered_image_urls
+from app.publication.preflight import validate_draft_with_mercadolibre
+from app.publication.shipping import ShippingCapabilityError, fetch_shipping_capabilities
 from app.publication.validation import validate_draft
 
 logger = logging.getLogger("ml-publication")
@@ -25,6 +36,44 @@ router = APIRouter(prefix="/api/publication", tags=["publication"])
 class BatchAction(BaseModel):
     batch_id: uuid.UUID
     draft_ids: list[uuid.UUID] | None = None
+
+
+
+@router.get("/shipping-options")
+def shipping_options(
+    account_id: uuid.UUID,
+    category_id: str,
+    db: Session = Depends(get_db),
+):
+    account = db.get(MercadoLibreAccount, account_id)
+    if not account or not account.active or not account.seller_id:
+        raise HTTPException(
+            status_code=404,
+            detail="Cuenta de Mercado Libre no encontrada o sin seller_id.",
+        )
+
+    token = load_access_token(db, account.id)
+    try:
+        client = MercadoLibreClient(token)
+        capabilities = fetch_shipping_capabilities(
+            client,
+            seller_id=account.seller_id,
+            category_id=category_id,
+        )
+    except ShippingCapabilityError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except MercadoLibreError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Mercado Libre no pudo informar las opciones de envío de la cuenta.",
+        ) from exc
+
+    return {
+        "mode": capabilities.mode,
+        "base_logistic_type": capabilities.base_logistic_type,
+        "flex_available": capabilities.flex_available,
+        "flex_logistic_type": capabilities.flex_logistic_type,
+    }
 
 
 @router.get("/commercial-options")
@@ -60,13 +109,11 @@ def commercial_options(
 
 
 def _image_urls(request: Request, version: ProductVersion, draft: PublicationDraft) -> list[str]:
-    images = {str(img.id): img for img in version.images}
-    result = []
-    for image_id in draft.image_order:
-        image = images.get(str(image_id))
-        if image:
-            result.append(str(request.url_for("serve_upload", image_id=str(image.id))))
-    return result
+    return ordered_image_urls(
+        version,
+        draft,
+        lambda image_id: str(request.url_for("serve_upload", image_id=image_id)),
+    )
 
 
 @router.get("/drafts/{draft_id}/dry-run")
@@ -96,7 +143,7 @@ def dry_run(draft_id: uuid.UUID, request: Request, db: Session = Depends(get_db)
 
 
 @router.post("/jobs")
-def create_publication_job(payload: BatchAction, db: Session = Depends(get_db)):
+def create_publication_job(payload: BatchAction, request: Request, db: Session = Depends(get_db)):
     batch = db.get(DraftBatch, payload.batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found.")
@@ -119,8 +166,26 @@ def create_publication_job(payload: BatchAction, db: Session = Depends(get_db)):
         approved = [approved_by_id[draft_id] for draft_id in payload.draft_ids]
 
     validation_failures = []
+    batch_version = db.get(ProductVersion, batch.product_version_id)
+    if batch_version is None:
+        raise HTTPException(status_code=409, detail="La versión de producto del lote ya no existe.")
+
     for draft in approved:
         errors, _warnings = validate_draft(db, draft)
+        if not errors:
+            try:
+                errors.extend(
+                    validate_draft_with_mercadolibre(
+                        db,
+                        draft,
+                        _image_urls(request, batch_version, draft),
+                    )
+                )
+            except MercadoLibreError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail="Mercado Libre no pudo ejecutar la validación previa. Volvé a intentar antes de publicar.",
+                ) from exc
         if errors:
             validation_failures.append({
                 "draft_id": str(draft.id),
@@ -134,9 +199,10 @@ def create_publication_job(payload: BatchAction, db: Session = Depends(get_db)):
             detail={
                 "code": "DRAFTS_NOT_PUBLISHABLE",
                 "message": (
-                    "Uno o más borradores seleccionados ya no cumplen las validaciones necesarias "
-                    "para publicación live. Corregilos y volvé a validar antes de crear el job."
-                ),
+                    "Uno o más borradores seleccionados no pasan la validación previa de Mercado Libre. "
+                    f"{validation_failures[0]['errors'][0].get('message', '')} "
+                    "Corregí la ficha y volvé a validar antes de crear el job."
+                ).strip(),
                 "drafts": validation_failures,
             },
         )

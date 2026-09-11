@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
@@ -118,6 +119,18 @@ class MercadoLibreClient:
             raise MercadoLibreError("Unexpected category attributes response.")
         return value
 
+    def user_shipping_preferences(self, seller_id: str) -> dict:
+        value = self.get(f"/users/{seller_id}/shipping_preferences")
+        if not isinstance(value, dict):
+            raise MercadoLibreError("Unexpected user shipping preferences response.")
+        return value
+
+    def category_shipping_preferences(self, category_id: str) -> dict:
+        value = self.get(f"/categories/{category_id}/shipping_preferences")
+        if not isinstance(value, dict):
+            raise MercadoLibreError("Unexpected category shipping preferences response.")
+        return value
+
     def available_listing_types(self, seller_id: str, category_id: str) -> dict:
         params = urlencode({"category_id": category_id})
         value = self.get(f"/users/{seller_id}/available_listing_types?{params}")
@@ -142,6 +155,42 @@ class MercadoLibreClient:
                 terms.append(keyword)
         return terms
 
+
+    def upload_item_picture(self, file_path: str | Path, mime_type: str) -> dict:
+        """Upload one local item picture and return Mercado Libre picture metadata."""
+
+        path = Path(file_path)
+        try:
+            with path.open("rb") as file_handle, httpx.Client(
+                base_url=self._base_url,
+                timeout=self._timeout,
+                headers=self._headers(),
+            ) as client:
+                response = client.post(
+                    "/pictures/items/upload",
+                    files={"file": (path.name, file_handle, mime_type)},
+                )
+        except OSError as exc:
+            raise MercadoLibreError(f"No se pudo leer la imagen local: {path.name}.", 422) from exc
+        except httpx.TimeoutException as exc:
+            raise MercadoLibreError("Mercado Libre picture upload timed out.") from exc
+        except httpx.RequestError as exc:
+            raise MercadoLibreError("Mercado Libre picture upload failed.") from exc
+
+        self._raise(response)
+        payload = self._safe_json(response)
+        picture_id = str(payload.get("id") or "").strip()
+        if not picture_id:
+            raise MercadoLibreError(
+                "Mercado Libre returned an invalid picture upload response.",
+                502,
+                payload,
+            )
+        return payload
+
+    def validate_item(self, payload: dict) -> PublishResponse:
+        return self.post("/items/validate", payload)
+
     def create_item(self, payload: dict) -> PublishResponse:
         return self.post("/items", payload)
 
@@ -164,6 +213,7 @@ class MercadoLibreClient:
         currency_id: str,
         logistic_type: str | None = None,
         shipping_mode: str | None = None,
+        billable_weight_grams: object | None = None,
     ) -> list[dict] | dict:
         params = {
             "category_id": category_id,
@@ -175,7 +225,40 @@ class MercadoLibreClient:
             params["logistic_type"] = logistic_type
         if shipping_mode is not None:
             params["shipping_mode"] = shipping_mode
+        if billable_weight_grams is not None:
+            params["billable_weight"] = str(billable_weight_grams)
         return self.get(f"/sites/{site_id}/listing_prices?{urlencode(params)}")
+
+    def shipping_options_free(
+        self,
+        *,
+        seller_id: str,
+        dimensions: str,
+        item_price: object,
+        listing_type_id: str,
+        mode: str,
+        condition: str,
+        logistic_type: str,
+        free_shipping: bool,
+        category_id: str,
+        currency_id: str,
+    ) -> dict:
+        params = {
+            "dimensions": dimensions,
+            "verbose": "true",
+            "item_price": str(item_price),
+            "listing_type_id": listing_type_id,
+            "mode": mode,
+            "condition": condition,
+            "logistic_type": logistic_type,
+            "free_shipping": "true" if free_shipping else "false",
+            "category_id": category_id,
+            "currency_id": currency_id,
+        }
+        value = self.get(f"/users/{seller_id}/shipping_options/free?{urlencode(params)}")
+        if not isinstance(value, dict):
+            raise MercadoLibreError("Unexpected shipping options response.")
+        return value
 
     def item_prices(self, item_id: str, *, show_all: bool = True) -> dict:
         value = self.get(

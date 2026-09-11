@@ -1,9 +1,9 @@
 import React, {useEffect, useMemo, useState} from "react";
 import {createRoot} from "react-dom/client";
-import {api, downloadFile, jobEvents} from "./api";
+import {api, downloadFile, jobEvents, loadShippingCapabilities} from "./api";
 import {PriceCalculator} from "./pricing/PriceCalculator";
 import {PricingProfileEditor} from "./pricing/PricingProfileEditor";
-import type {PricingCalculation, PricingProfile} from "./pricing/types";
+import {normalizeQuantityPricing, type PricingCalculation, type PricingCalculatorPrefill, type PricingProfile, type QuantityPricingAnalysis, type QuantityPricingApiResponse, type ShippingCapabilities} from "./pricing/types";
 import {TitleAssistant} from "./title-intelligence/TitleAssistant";
 import "./styles.css";
 
@@ -29,6 +29,7 @@ type Field = {
   required: boolean;
   required_for_item?: boolean;
   catalog_required?: boolean;
+  conditional_required?: boolean;
   hidden?: boolean;
   importance?: "required" | "recommended" | "secondary" | "system";
   relevance?: number;
@@ -147,6 +148,32 @@ function money(value: any) {
   return new Intl.NumberFormat("es-AR", {style: "currency", currency: "ARS", maximumFractionDigits: 2}).format(number);
 }
 
+function publisherPricingTargets(analysis: any) {
+  if (!analysis) return [];
+  const options = [
+    {key: "mc0", label: "MC 0%", target: analysis.mc0},
+    {key: "mc15", label: "MC 15%", target: analysis.mc15},
+    {key: "mc20", label: "MC 20%", target: analysis.mc20},
+  ].filter(option => option.target);
+
+  const recommendedMargin = Number(analysis.audit?.recommended_target_margin_pct);
+  const recommendedPrice = Number(analysis.recommended_price);
+  const marginVisible = options.some(option => Math.abs(Number(option.target.target_margin_pct) - recommendedMargin) < 0.001);
+  if (!marginVisible) {
+    const recommendedTarget = [analysis.target, analysis.minimum].find(
+      target => target && Math.abs(Number(target.target_margin_pct) - recommendedMargin) < 0.001
+    );
+    if (recommendedTarget) {
+      options.push({key: "recommended", label: `MC ${recommendedMargin}%`, target: recommendedTarget});
+    }
+  }
+
+  return options.map(option => ({
+    ...option,
+    recommended: Math.abs(Number(option.target.gross_price) - recommendedPrice) < 0.01,
+  }));
+}
+
 function buildMeasurementValue(numberText: string, unit: string) {
   const normalizedNumber = numberText.trim().replace(",", ".");
   if (!normalizedNumber) return null;
@@ -191,6 +218,7 @@ function App() {
   const [dismissedExistingSku, setDismissedExistingSku] = useState("");
   const [skuLookupBusy, setSkuLookupBusy] = useState(false);
   const [commercialAllocations, setCommercialAllocations] = useState<CommercialAllocation[]>([]);
+  const [pricingListingTypeId, setPricingListingTypeId] = useState("");
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
   const [activeView, setActiveView] = useState<"publisher" | "pricing-settings" | "price-calculator">("publisher");
@@ -201,13 +229,17 @@ function App() {
     monthly_units_projection: null, rounding_step: 1, components: []
   });
   const [productCost, setProductCost] = useState("0");
-  const [additionalUnitCost, setAdditionalUnitCost] = useState("0");
   const [pricingAnalysis, setPricingAnalysis] = useState<any>(null);
+  const [calculatorPrefill, setCalculatorPrefill] = useState<PricingCalculatorPrefill | null>(null);
   const [simulationPackage, setSimulationPackage] = useState({
-    dimensions: "", weight: "", logisticType: "", shippingMode: "",
+    dimensions: "", weight: "", logisticType: "", shippingMode: "", freeShipping: "",
   });
+  const [shippingCapabilities, setShippingCapabilities] = useState<ShippingCapabilities | null>(null);
+  const [shippingCapabilitiesLoading, setShippingCapabilitiesLoading] = useState(false);
+  const [shippingCapabilitiesError, setShippingCapabilitiesError] = useState("");
   const [quantityPricingEnabled, setQuantityPricingEnabled] = useState(false);
   const [quantityPrices, setQuantityPrices] = useState<QuantityPriceTier[]>([]);
+  const [quantityPricingAnalysis, setQuantityPricingAnalysis] = useState<QuantityPricingAnalysis | null>(null);
 
   const [form, setForm] = useState({
     sku: "", name: "", title: "", brand: "", model: "", characteristics: "", description: "",
@@ -222,8 +254,20 @@ function App() {
   const totalCount = Math.max(1, Number(form.count) || 1);
   const allocatedCount = commercialAllocations.reduce((sum, option) => sum + Math.max(0, option.count), 0);
   const distributionInvalid = allocatedCount !== totalCount;
+  const activeCommercialAllocations = useMemo(
+    () => commercialAllocations.filter(option => option.count > 0),
+    [commercialAllocations]
+  );
 
   const contextComplete = Boolean(accountId && categoryId);
+  const shippingReady = Boolean(
+    shippingCapabilities
+    && simulationPackage.shippingMode === shippingCapabilities.mode
+    && (
+      simulationPackage.logisticType === shippingCapabilities.base_logistic_type
+      || (shippingCapabilities.flex_available && simulationPackage.logisticType === shippingCapabilities.flex_logistic_type)
+    )
+  );
   const productComplete = Boolean(versionId);
   const draftsComplete = drafts.length > 0;
   const approvedCount = drafts.filter(d => d.status === "APPROVED").length;
@@ -248,13 +292,35 @@ function App() {
     ),
     [fields, groupedRequiredAttributeIds, dedicatedAttributeIds]
   );
-  const recommendedFields = useMemo(
-    () => fields.filter(field => field.importance === "recommended" && !groupedRequiredAttributeIds.has(field.id) && !dedicatedAttributeIds.has(field.id)),
+  const conditionalFields = useMemo(
+    () => fields.filter(
+      field => Boolean(field.conditional_required)
+        && !groupedRequiredAttributeIds.has(field.id)
+        && !dedicatedAttributeIds.has(field.id)
+    ),
     [fields, groupedRequiredAttributeIds, dedicatedAttributeIds]
   );
+  const conditionalFieldIds = useMemo(
+    () => new Set(conditionalFields.map(field => field.id)),
+    [conditionalFields]
+  );
+  const recommendedFields = useMemo(
+    () => fields.filter(
+      field => field.importance === "recommended"
+        && !conditionalFieldIds.has(field.id)
+        && !groupedRequiredAttributeIds.has(field.id)
+        && !dedicatedAttributeIds.has(field.id)
+    ),
+    [fields, conditionalFieldIds, groupedRequiredAttributeIds, dedicatedAttributeIds]
+  );
   const secondaryFields = useMemo(
-    () => fields.filter(field => field.importance === "secondary" && !groupedRequiredAttributeIds.has(field.id) && !dedicatedAttributeIds.has(field.id)),
-    [fields, groupedRequiredAttributeIds, dedicatedAttributeIds]
+    () => fields.filter(
+      field => field.importance === "secondary"
+        && !conditionalFieldIds.has(field.id)
+        && !groupedRequiredAttributeIds.has(field.id)
+        && !dedicatedAttributeIds.has(field.id)
+    ),
+    [fields, conditionalFieldIds, groupedRequiredAttributeIds, dedicatedAttributeIds]
   );
   const completedRecommendedFields = recommendedFields.filter(
     field => attributeValuePresent(attributes[field.id])
@@ -381,7 +447,62 @@ function App() {
     setDrafts([]);
     setKeywordIntelligence(null);
     setSelectedDraftIds([]);
+    setPricingAnalysis(null);
+    setShippingCapabilities(null);
+    setShippingCapabilitiesError("");
   }, [accountId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!accountId || !categoryId) {
+      setShippingCapabilities(null);
+      setShippingCapabilitiesError("");
+      setShippingCapabilitiesLoading(false);
+      return () => { cancelled = true; };
+    }
+
+    setShippingCapabilitiesLoading(true);
+    setShippingCapabilitiesError("");
+    loadShippingCapabilities(accountId, categoryId)
+      .then(capabilities => {
+        if (cancelled) return;
+        setShippingCapabilities(capabilities);
+        setSimulationPackage(current => {
+          const keepFlex = current.logisticType === capabilities.flex_logistic_type && capabilities.flex_available;
+          return {
+            ...current,
+            shippingMode: capabilities.mode,
+            logisticType: keepFlex ? capabilities.flex_logistic_type : capabilities.base_logistic_type,
+          };
+        });
+        setPricingAnalysis(null);
+      })
+      .catch(reason => {
+        if (cancelled) return;
+        setShippingCapabilities(null);
+        setShippingCapabilitiesError(
+          reason instanceof Error ? reason.message : "No fue posible resolver Mercado Envíos para esta cuenta."
+        );
+      })
+      .finally(() => { if (!cancelled) setShippingCapabilitiesLoading(false); });
+
+    return () => { cancelled = true; };
+  }, [accountId, categoryId]);
+
+  useEffect(() => {
+    setPricingListingTypeId(current => {
+      if (activeCommercialAllocations.some(option => option.listing_type_id === current)) return current;
+      return activeCommercialAllocations.length === 1 ? activeCommercialAllocations[0].listing_type_id : "";
+    });
+  }, [activeCommercialAllocations]);
+
+  useEffect(() => {
+    setQuantityPricingAnalysis(null);
+  }, [
+    accountId, categoryId, pricingListingTypeId, productCost,
+    simulationPackage.dimensions, simulationPackage.weight, simulationPackage.logisticType,
+    simulationPackage.shippingMode, simulationPackage.freeShipping, pricingAnalysis, quantityPrices,
+  ]);
 
   useEffect(() => {
     let cancelled = false;
@@ -419,6 +540,7 @@ function App() {
       .then(([meta, listingResponse]) => {
         if (cancelled) return;
         const loadedFields: Field[] = meta.schema.fields || [];
+        setSelectedCategoryName(String(meta.name || categoryId));
         const loadedIdentifierContract = (meta.schema.product_identifier_contract || null) as ProductIdentifierContract | null;
         const maxTitleLength = meta.schema?.settings?.max_title_length;
         setFields(loadedFields);
@@ -544,14 +666,31 @@ function App() {
     })));
     setQuantityPricingEnabled(savedQuantityPrices.length > 0);
     const savedPricing = version.commercial?.pricing_analysis || null;
+    const savedPricingInputs = savedPricing?.publisher_inputs || {};
+    const savedPackage = version.logistics?.pricing_package || savedPricingInputs.package || {};
+    const savedMarketplaceContext = savedPricing?.audit?.marketplace_context || {};
+    const weightFromAudit = Number(savedMarketplaceContext.package_weight_grams);
+    const savedFreeShipping = savedPackage.free_shipping ?? savedMarketplaceContext.free_shipping;
     setPricingAnalysis(savedPricing);
+    setProductCost(String(savedPricingInputs.product_cost ?? savedPricing?.analyzed?.gross_cmv ?? "0"));
+    setSimulationPackage({
+      dimensions: String(savedPackage.dimensions || savedMarketplaceContext.dimensions || ""),
+      weight: String(savedPackage.weight_kg ?? (Number.isFinite(weightFromAudit) && weightFromAudit > 0 ? weightFromAudit / 1000 : "")),
+      logisticType: String(savedPackage.logistic_type || savedMarketplaceContext.logistic_type || ""),
+      shippingMode: String(savedPackage.shipping_mode || savedMarketplaceContext.shipping_mode || ""),
+      freeShipping: savedFreeShipping === true || savedFreeShipping === "true"
+        ? "true"
+        : savedFreeShipping === false || savedFreeShipping === "false"
+          ? "false"
+          : "",
+    });
 
-    setCategoryId("");
-    setSelectedCategoryName("");
+    setCategoryId(version.category_id);
+    setSelectedCategoryName(version.category_id);
     setCategorySuggestions([]);
     setFields([]);
     setProductIdentifierMode("");
-    setAttributes({});
+    setAttributes({...version.attributes});
     setCustomAttributeFields({});
     setShowSecondaryAttributes(false);
     setVersionId("");
@@ -575,6 +714,7 @@ function App() {
       .filter(Boolean)
       .join(" ");
     const result = await searchCategoriesForPricing(accountId, query);
+    setPricingAnalysis(null);
     setCategorySuggestions(result);
     setCategoryId("");
     setSelectedCategoryName("");
@@ -583,6 +723,7 @@ function App() {
   }
 
   function chooseCategory(suggestion: CategorySuggestion) {
+    setPricingAnalysis(null);
     setCategoryId(suggestion.category_id);
     setSelectedCategoryName(suggestion.category_name);
     setMessage(`Categoría hoja seleccionada: ${suggestion.category_name}.`);
@@ -629,52 +770,110 @@ function App() {
         name: component.name, kind: component.kind, value: Number(component.value), basis: component.basis, active: Boolean(component.active)
       })),
     });
+    setPricingAnalysis(null);
     setMessage("Configuración económica guardada.");
+  }
+
+  function publisherPricingPayload(salePrice: number | null) {
+    return {
+      account_id: accountId,
+      category_id: categoryId,
+      listing_type_id: pricingListingTypeId,
+      product_cost: Number(productCost),
+      sale_price: salePrice,
+      package: {
+        dimensions: simulationPackage.dimensions || null,
+        weight: simulationPackage.weight ? Number(simulationPackage.weight) : null,
+        logistic_type: simulationPackage.logisticType || null,
+        shipping_mode: simulationPackage.shippingMode || null,
+        free_shipping: simulationPackage.freeShipping === "" ? null : simulationPackage.freeShipping === "true",
+      },
+    };
   }
 
   async function simulateCurrentPrice() {
     if (!pricingConfigured) throw new Error("Configurá primero Costos y rentabilidad.");
-    const listingTypeId = commercialAllocations[0]?.listing_type_id;
+    const listingTypeId = pricingListingTypeId;
     if (!accountId || !categoryId || !listingTypeId) {
-      throw new Error("Elegí cuenta, categoría y una modalidad comercial antes de calcular.");
+      throw new Error("Elegí cuenta, categoría y la modalidad de Mercado Libre que querés analizar.");
     }
     const result = await api<any>("/api/pricing/simulate", {
       method: "POST",
-      body: JSON.stringify({
-        account_id: accountId,
-        category_id: categoryId,
-        listing_type_id: listingTypeId,
+      body: JSON.stringify(publisherPricingPayload(Number(form.price) > 0 ? Number(form.price) : null)),
+    });
+    setPricingAnalysis({
+      calculation_version: "pricing_v2_economic",
+      ...result,
+      publisher_inputs: {
         product_cost: Number(productCost),
-        sale_price: Number(form.price) > 0 ? Number(form.price) : null,
-        additional_unit_costs: Number(additionalUnitCost) > 0
-          ? [{name: "Otros costos directos del producto", amount: Number(additionalUnitCost)}]
-          : [],
         package: {
           dimensions: simulationPackage.dimensions || null,
-          weight: simulationPackage.weight ? Number(simulationPackage.weight) : null,
+          weight_kg: simulationPackage.weight ? Number(simulationPackage.weight) : null,
           logistic_type: simulationPackage.logisticType || null,
           shipping_mode: simulationPackage.shippingMode || null,
+          free_shipping: simulationPackage.freeShipping === "" ? null : simulationPackage.freeShipping === "true",
         },
+      },
+    });
+  }
+
+  async function simulateQuantityPrices() {
+    if (!pricingConfigured) throw new Error("Configurá primero Costos y rentabilidad.");
+    if (!accountId || !categoryId || !pricingListingTypeId) {
+      throw new Error("Completá cuenta, categoría y modalidad antes de analizar precios mayoristas.");
+    }
+    if (!quantityPrices.length) throw new Error("Agregá al menos un escalón mayorista.");
+    const invalidTier = quantityPrices.some(tier => tier.min_purchase_unit <= 1 || tier.amount <= 0);
+    if (invalidTier) throw new Error("Completá cantidades mayores a 1 y precios unitarios mayores a 0.");
+    const response = await api<QuantityPricingApiResponse>("/api/pricing/quantity-tiers", {
+      method: "POST",
+      body: JSON.stringify({
+        ...publisherPricingPayload(Number(form.price) > 0 ? Number(form.price) : null),
+        tiers: quantityPrices,
       }),
     });
-    setPricingAnalysis({calculation_version: "pricing_v2_economic", ...result});
+    setQuantityPricingAnalysis(normalizeQuantityPricing(response));
   }
 
   function transferRecommendedPrice(price: number, calculation: PricingCalculation) {
     setForm(previous => ({...previous, price: String(price)}));
+    const marketplaceContext = calculation.audit.marketplaceContext;
+    const packageWeightGrams = Number(marketplaceContext.package_weight_grams);
     setPricingAnalysis({
       calculation_version: "pricing_v2_economic",
       scenario: calculation.scenario,
       scenario_units: calculation.scenarioUnits,
       recommended_price: price,
       analyzed: {
+        gross_price: calculation.analyzed.grossPrice,
+        gross_cmv: calculation.analyzed.grossCmv,
         net_cmv: calculation.analyzed.netCmv,
         contribution_margin: calculation.analyzed.contributionMargin,
         contribution_margin_pct: calculation.analyzed.contributionMarginPct,
       },
-      mc0: {gross_price: calculation.mc0.grossPrice},
-      mc15: {gross_price: calculation.mc15.grossPrice},
-      mc20: {gross_price: calculation.mc20.grossPrice},
+      mc0: {target_margin_pct: calculation.mc0.targetMarginPct, gross_price: calculation.mc0.grossPrice},
+      mc15: {target_margin_pct: calculation.mc15.targetMarginPct, gross_price: calculation.mc15.grossPrice},
+      mc20: {target_margin_pct: calculation.mc20.targetMarginPct, gross_price: calculation.mc20.grossPrice},
+      minimum: {target_margin_pct: calculation.minimum.targetMarginPct, gross_price: calculation.minimum.grossPrice},
+      target: {target_margin_pct: calculation.target.targetMarginPct, gross_price: calculation.target.grossPrice},
+      audit: {
+        marketplace_context: marketplaceContext,
+        target_margin_pct: calculation.audit.targetMarginPct,
+        target_margin_source: calculation.audit.targetMarginSource,
+        minimum_margin_pct: calculation.audit.minimumMarginPct,
+        recommended_target_margin_pct: calculation.audit.recommendedTargetMarginPct,
+        rounding_step: calculation.audit.roundingStep,
+      },
+      publisher_inputs: {
+        product_cost: calculation.analyzed.grossCmv,
+        package: {
+          dimensions: String(marketplaceContext.dimensions || ""),
+          weight_kg: Number.isFinite(packageWeightGrams) && packageWeightGrams > 0 ? packageWeightGrams / 1000 : null,
+          logistic_type: String(marketplaceContext.logistic_type || ""),
+          shipping_mode: String(marketplaceContext.shipping_mode || ""),
+          free_shipping: String(marketplaceContext.free_shipping) === "true",
+        },
+      },
     });
     setActiveView("publisher");
     setMessage("Precio recomendado transferido al formulario. Todavía no se creó ninguna publicación.");
@@ -683,10 +882,9 @@ function App() {
   function addQuantityPriceTier() {
     if (quantityPrices.length >= 5) return;
     const previousQuantity = quantityPrices.length ? quantityPrices[quantityPrices.length - 1].min_purchase_unit : 1;
-    const previousPrice = quantityPrices.length ? quantityPrices[quantityPrices.length - 1].amount : Number(form.price || 0);
     setQuantityPrices(current => [...current, {
       min_purchase_unit: previousQuantity + 1,
-      amount: previousPrice > 0 ? Math.max(0.01, Math.round(previousPrice * 0.95 * 100) / 100) : 0,
+      amount: 0,
     }]);
   }
 
@@ -723,7 +921,44 @@ function App() {
   }
 
   function currentLogisticsContract() {
-    return {local_pick_up: form.localPickup};
+    const hasPricingPackage = Boolean(
+      simulationPackage.dimensions.trim()
+      || simulationPackage.weight
+      || simulationPackage.logisticType
+      || simulationPackage.shippingMode
+      || simulationPackage.freeShipping
+    );
+    return {
+      local_pick_up: form.localPickup,
+      ...(hasPricingPackage ? {
+        pricing_package: {
+          dimensions: simulationPackage.dimensions.trim() || null,
+          weight_kg: simulationPackage.weight ? Number(simulationPackage.weight) : null,
+          logistic_type: simulationPackage.logisticType || null,
+          shipping_mode: simulationPackage.shippingMode || null,
+          free_shipping: simulationPackage.freeShipping === "" ? null : simulationPackage.freeShipping === "true",
+        },
+      } : {}),
+    };
+  }
+
+  function openPricingDetail() {
+    const listingTypeId = pricingListingTypeId;
+    setCalculatorPrefill({
+      requestId: Date.now(),
+      accountId,
+      categoryId,
+      categoryLabel: selectedCategoryName || categoryId,
+      listingTypeId,
+      grossCmv: productCost,
+      salePrice: form.price,
+      dimensions: simulationPackage.dimensions,
+      weight: simulationPackage.weight,
+      logisticType: simulationPackage.logisticType,
+      shippingMode: simulationPackage.shippingMode,
+      freeShipping: simulationPackage.freeShipping,
+    });
+    setActiveView("price-calculator");
   }
 
   async function createProduct() {
@@ -734,6 +969,9 @@ function App() {
     }
     if (!requiredAttributesComplete) {
       throw new Error("Completá los atributos obligatorios informados por Mercado Libre.");
+    }
+    if (!shippingReady) {
+      throw new Error("Esperá a que Mercado Libre confirme la configuración de Mercado Envíos para esta categoría.");
     }
     const payload = {
       internal_sku: form.sku.trim(),
@@ -773,6 +1011,9 @@ function App() {
     if (!requiredAttributesComplete) {
       throw new Error("Completá los atributos obligatorios antes de revalidar el lote.");
     }
+    if (!shippingReady) {
+      throw new Error("Esperá a que Mercado Libre confirme la configuración de Mercado Envíos antes de revalidar.");
+    }
 
     const correction = await api<any>(`/api/drafts/batches/${batchId}/product-correction`, {
       method:"POST",
@@ -791,9 +1032,11 @@ function App() {
 
     const validation = await api<any>(`/api/drafts/batches/${batchId}/validate`, {method:"POST"});
     await loadBatch(batchId);
+    const firstIssue = validation.results?.flatMap((result:any) => result.errors || [])[0];
     setMessage(
       `Correcciones guardadas en la versión ${correction.version_number}. ` +
-      `${validation.ready} borrador(es) listos y ${validation.invalid} con observaciones. No fue necesario regenerar el lote.`
+      `${validation.ready} borrador(es) listos y ${validation.invalid} con observaciones.` +
+      (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : " No fue necesario regenerar el lote.")
     );
   }
 
@@ -872,8 +1115,14 @@ function App() {
   }
 
   async function validateDraft(id: string) {
-    await api(`/api/drafts/${id}/validate`, {method:"POST"});
+    const result = await api<any>(`/api/drafts/${id}/validate`, {method:"POST"});
     await loadBatch();
+    const firstIssue = result.errors?.[0];
+    setMessage(
+      result.valid
+        ? "El borrador pasó la validación previa de Mercado Libre."
+        : `Falta corregir: ${firstIssue?.message || "Mercado Libre rechazó la validación previa."}`
+    );
   }
 
   async function approveDraft(id: string) {
@@ -885,7 +1134,11 @@ function App() {
     if (!batchId) return;
     const result = await api<any>(`/api/drafts/batches/${batchId}/validate`, {method:"POST"});
     await loadBatch(batchId);
-    setMessage(`${result.ready} borrador(es) listos y ${result.invalid} con observaciones después de validar el lote.`);
+    const firstIssue = result.results?.flatMap((item:any) => item.errors || [])[0];
+    setMessage(
+      `${result.ready} borrador(es) listos y ${result.invalid} con observaciones después de validar el lote.` +
+      (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : "")
+    );
   }
 
   async function approveReady() {
@@ -1158,6 +1411,7 @@ function App() {
         <PriceCalculator
           accountId={accountId}
           accounts={accounts}
+          prefill={calculatorPrefill}
           onSearchCategories={searchCategoriesForPricing}
           onLoadPublicationTypes={loadPublicationTypes}
           onUseRecommendedPrice={transferRecommendedPrice}
@@ -1255,34 +1509,69 @@ function App() {
           <div className="sectionTitle"><span>2</span> Ficha técnica</div>
           {!contextComplete && <div className="lockedMessage">Ingresá el producto, buscá categorías y confirmá una categoría hoja para continuar.</div>}
           <div className="grid3">
-            <label>Precio ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>setForm({...form,price:e.target.value})}/></label>
+            <label>Precio ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>{setForm({...form,price:e.target.value});setPricingAnalysis(null);}}/></label>
             <label>Stock<input disabled={!contextComplete} type="number" value={form.quantity} onChange={e=>setForm({...form,quantity:e.target.value})}/></label>
           </div>
-          <div className="economicSimulator">
+          <div className="publisherShippingContext">
+            <div className="publisherContextHeader">
+              <div><h3>Datos de envío</h3><p className="helper blockHelper">Estos datos describen el paquete y se reutilizan para publicación y cálculo de costos. No son parámetros económicos.</p></div>
+            </div>
+            <div className="grid2 shippingPackageGrid">
+              <label>Dimensiones del paquete (L×A×H, cm)<input disabled={!contextComplete} value={simulationPackage.dimensions} onChange={e=>{setSimulationPackage({...simulationPackage, dimensions:e.target.value});setPricingAnalysis(null);}} placeholder="30x20x10"/></label>
+              <label>Peso del paquete (kg)<input disabled={!contextComplete} type="number" min="0.01" step="0.01" value={simulationPackage.weight} onChange={e=>{setSimulationPackage({...simulationPackage, weight:e.target.value});setPricingAnalysis(null);}}/></label>
+            </div>
+            <div className="shippingPanel">
+              <div className="shippingPanelHeader">
+                <div><span className="shippingEyebrow">Envío</span><b>Mercado Envíos</b><small>La modalidad técnica se toma de la configuración real de tu cuenta y de la categoría.</small></div>
+                <span className={`shippingStatus ${shippingCapabilities ? "ready" : "pending"}`}>{shippingCapabilitiesLoading ? "Consultando…" : shippingCapabilities ? "Activo" : "Pendiente"}</span>
+              </div>
+              {shippingCapabilitiesError && <div className="shippingCapabilityError">{shippingCapabilitiesError}</div>}
+              {shippingCapabilities && <div className="shippingDecisionGrid">
+                <div className="shippingDecision">
+                  <span>¿Ofrecer Mercado Envíos Flex?</span>
+                  <div className="segmentedChoice" role="group" aria-label="Ofrecer Mercado Envíos Flex">
+                    <button type="button" className={simulationPackage.logisticType !== shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.base_logistic_type}));setPricingAnalysis(null);}}>No</button>
+                    <button type="button" disabled={!shippingCapabilities.flex_available} className={simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.flex_logistic_type}));setPricingAnalysis(null);}}>Sí</button>
+                  </div>
+                  <small>{shippingCapabilities.flex_available ? "Flex está habilitado para esta cuenta y categoría." : "Mercado Libre no habilita Flex para este contexto."}</small>
+                </div>
+                <label>Quién paga el envío<select disabled={!contextComplete} value={simulationPackage.freeShipping} onChange={e=>{setSimulationPackage({...simulationPackage, freeShipping:e.target.value});setPricingAnalysis(null);}}><option value="">Elegí una opción</option><option value="false">El comprador paga</option><option value="true">Ofrecer envío gratis</option></select><small>Mercado Libre aplicará igualmente las reglas obligatorias de envío gratis cuando correspondan.</small></label>
+              </div>}
+            </div>
+          </div>
+
+          <div className="economicSimulator pricingProposalPanel">
             <div className="economicSimulatorHeader">
-              <div><h3>Análisis económico</h3><p className="helper blockHelper">Usa la Calculadora de Precio con costos configurados y la tarifa/logística real de Mercado Libre.</p></div>
-              {!pricingConfigured && <button type="button" className="secondary" onClick={()=>setActiveView("pricing-settings")}>Configurar costos</button>}
+              <div><h3>Propuestas de precio</h3><p className="helper blockHelper">Ingresá únicamente el costo del producto. El resto se toma de Configuración y de Mercado Libre.</p></div>
+              {!pricingConfigured && <button type="button" className="secondary" onClick={()=>setActiveView("pricing-settings")}>Configurar política económica</button>}
             </div>
-            <div className="grid3">
-              <label>Costo del producto<input disabled={!contextComplete} type="number" min="0" step="0.01" value={productCost} onChange={e=>setProductCost(e.target.value)}/></label>
-              <label>Otros costos netos / unidad<input disabled={!contextComplete} type="number" min="0" step="0.01" value={additionalUnitCost} onChange={e=>setAdditionalUnitCost(e.target.value)}/></label>
-              <label>Modalidad ML<input disabled value={commercialAllocations[0]?.listing_type_name || "Pendiente de resolver"}/></label>
+            <div className={`publisherPricingInputs ${activeCommercialAllocations.length > 1 ? "withListingType" : ""}`}>
+              <label className="publisherCostInput">Costo del producto (con IVA)<input disabled={!contextComplete} type="number" min="0" step="0.01" value={productCost} onChange={e=>{setProductCost(e.target.value);setPricingAnalysis(null);}} placeholder="0,00"/><small>Es el único costo que cargás por producto. Los demás costos se administran en Configuración.</small></label>
+              {activeCommercialAllocations.length > 1 && <label>Modalidad a analizar<select disabled={!contextComplete} value={pricingListingTypeId} onChange={e=>{setPricingListingTypeId(e.target.value);setPricingAnalysis(null);}}><option value="">Elegí una modalidad</option>{activeCommercialAllocations.map(option=><option key={option.listing_type_id} value={option.listing_type_id}>{option.listing_type_name}</option>)}</select><small>Este lote usa más de una modalidad de publicación.</small></label>}
+              {activeCommercialAllocations.length === 1 && <div className="pricingResolvedContext"><span>Modalidad</span><b>{activeCommercialAllocations[0].listing_type_name}</b><small>Se toma automáticamente de la configuración del lote.</small></div>}
             </div>
-            <div className="grid4">
-              <label>Dimensiones<input disabled={!contextComplete} value={simulationPackage.dimensions} onChange={e=>setSimulationPackage({...simulationPackage, dimensions:e.target.value})} placeholder="30x20x10"/></label>
-              <label>Peso<input disabled={!contextComplete} type="number" min="0" step="0.01" value={simulationPackage.weight} onChange={e=>setSimulationPackage({...simulationPackage, weight:e.target.value})}/></label>
-              <label>Tipo logístico<input disabled={!contextComplete} value={simulationPackage.logisticType} onChange={e=>setSimulationPackage({...simulationPackage, logisticType:e.target.value})} placeholder="drop_off"/></label>
-              <label>Modo de envío<input disabled={!contextComplete} value={simulationPackage.shippingMode} onChange={e=>setSimulationPackage({...simulationPackage, shippingMode:e.target.value})} placeholder="me2"/></label>
+            <div className="pricingProposalActions">
+              <button type="button" disabled={!contextComplete || !pricingConfigured || !Number(productCost) || busy} onClick={()=>run(simulateCurrentPrice)}>{busy ? "Calculando…" : "Calcular propuestas"}</button>
+              <span>Usa la categoría, modalidad y logística ya cargadas en esta ficha.</span>
             </div>
-            <button type="button" className="secondary" disabled={!contextComplete || !pricingConfigured || busy} onClick={()=>run(simulateCurrentPrice)}>Calcular rentabilidad</button>
-            {pricingAnalysis && <div className="pricingResults">
-              <div><span>CMV neto</span><b>{money(pricingAnalysis.analyzed.net_cmv)}</b></div>
-              <div><span>MC 0%</span><b>{money(pricingAnalysis.mc0.gross_price)}</b></div>
-              <div><span>MC 15%</span><b>{money(pricingAnalysis.mc15.gross_price)}</b></div>
-              <div><span>MC 20%</span><b>{money(pricingAnalysis.mc20.gross_price)}</b></div>
-              <div className="recommended"><span>Sugerido</span><b>{money(pricingAnalysis.recommended_price)}</b></div>
-              <div className="priceHealth"><span>Margen analizado</span><b>{pricingAnalysis.analyzed.contribution_margin_pct}%</b><small>{money(pricingAnalysis.analyzed.contribution_margin)}</small></div>
-              <button type="button" onClick={()=>setForm({...form,price:String(pricingAnalysis.recommended_price)})}>Usar precio sugerido</button>
+            {pricingAnalysis && <div className="publisherPricingStory">
+              {Number(form.price) > 0 && <div className="publisherCurrentPrice">
+                <div><span>Precio actual</span><b>{money(form.price)}</b></div>
+                <div><span>Margen actual</span><b>{Number(pricingAnalysis.analyzed.contribution_margin_pct).toFixed(2)}%</b></div>
+                <div><span>Resultado por venta</span><b>{money(pricingAnalysis.analyzed.contribution_margin)}</b></div>
+              </div>}
+              <div className="publisherPricingTargets">
+                {publisherPricingTargets(pricingAnalysis).map(option => <div key={option.key} className={`publisherPricingTarget${option.recommended ? " recommended" : ""}`}>
+                  <div className="publisherPricingTargetHeader"><span>{option.label}</span>{option.recommended && <em>Recomendado</em>}</div>
+                  <b>{money(option.target.gross_price)}</b>
+                  <small>Margen logrado: {Number(option.target.achieved_margin_pct ?? option.target.target_margin_pct).toFixed(2)}%</small>
+                  {option.recommended && <button type="button" onClick={()=>setForm({...form,price:String(pricingAnalysis.recommended_price)})}>Usar este precio</button>}
+                </div>)}
+              </div>
+              <div className="pricingInlineFooter">
+                <span>Recomendación según tu política económica vigente.</span>
+                <button type="button" className="secondary" onClick={openPricingDetail}>Ver detalle en Calculadora</button>
+              </div>
             </div>}
           </div>
 
@@ -1291,15 +1580,28 @@ function App() {
             <p className="helper blockHelper">Mercado Libre habilita PxQ B2B sólo para vendedores seleccionados. La publicación principal no se pierde si ML rechaza la tabla mayorista; el job lo informa como advertencia.</p>
             {quantityPricingEnabled && <>
               <div className="quantityPriceRows">
-                {quantityPrices.map((tier,index)=><div className="quantityPriceRow" key={index}>
-                  <label>Desde<input type="number" min="2" value={tier.min_purchase_unit} onChange={e=>updateQuantityPriceTier(index,{min_purchase_unit:Number(e.target.value)})}/></label>
-                  <label>Precio unitario ARS<input type="number" min="0.01" step="0.01" value={tier.amount} onChange={e=>updateQuantityPriceTier(index,{amount:Number(e.target.value)})}/></label>
-                  {pricingAnalysis && <span className={Number(tier.amount) < Number(pricingAnalysis.mc0.gross_price) ? "tierRisk bad" : "tierRisk ok"}>{Number(tier.amount) < Number(pricingAnalysis.mc0.gross_price) ? "Debajo del piso MC 0%" : "Sobre el piso MC 0%"}</span>}
-                  <button type="button" className="tiny dangerButton" onClick={()=>removeQuantityPriceTier(index)}>Eliminar</button>
-                </div>)}
+                {quantityPrices.map((tier,index)=>{
+                  const analysis = quantityPricingAnalysis?.tiers[index];
+                  return <div className="quantityPriceRow" key={index}>
+                    <label>Desde<input type="number" min="2" value={tier.min_purchase_unit} onChange={e=>updateQuantityPriceTier(index,{min_purchase_unit:Number(e.target.value)})}/></label>
+                    <label>Precio unitario ARS<input type="number" min="0.01" step="0.01" value={tier.amount || ""} onChange={e=>updateQuantityPriceTier(index,{amount:Number(e.target.value)})} placeholder="Definí el precio"/></label>
+                    <div className="quantityTierEconomics">
+                      {analysis ? <>
+                        <span className={`tierRisk ${analysis.status === "VIABLE" ? "ok" : "bad"}`}>{analysis.status === "VIABLE" ? "VIABLE" : "BAJO MÍNIMO"}</span>
+                        <small>MC estimado: <b>{analysis.contributionMarginPct}%</b> · {money(analysis.contributionMargin)}</small>
+                        <small>Piso económico: <b>{money(analysis.minimumPrice)}</b> · Objetivo: <b>{money(analysis.targetPrice)}</b></small>
+                        <button type="button" className="tiny secondary" onClick={()=>updateQuantityPriceTier(index,{amount:analysis.targetPrice})}>Usar precio objetivo</button>
+                      </> : <small>Analizá el escalón para conocer su margen y los límites económicos.</small>}
+                    </div>
+                    <button type="button" className="tiny dangerButton" onClick={()=>removeQuantityPriceTier(index)}>Eliminar</button>
+                  </div>;
+                })}
               </div>
-              <button type="button" className="secondary" disabled={quantityPrices.length >= 5} onClick={addQuantityPriceTier}>+ Agregar escalón mayorista</button>
-              <small className="helper">Máximo 5 escalones. La cantidad mínima debe ser mayor a 1 y el precio unitario debe bajar al aumentar la cantidad.</small>
+              <div className="quantityPricingActions">
+                <button type="button" className="secondary" disabled={quantityPrices.length >= 5} onClick={addQuantityPriceTier}>+ Agregar escalón mayorista</button>
+                <button type="button" className="secondary" disabled={!pricingConfigured || !quantityPrices.length || busy} onClick={()=>run(simulateQuantityPrices)}>Analizar precios mayoristas</button>
+              </div>
+              <small className="helper">Máximo 5 escalones. No se aplica ningún descuento automático: definí cada precio y validalo contra el mismo motor económico del Publicador.</small>
             </>}
           </div>
           <label>Descripción<textarea disabled={!contextComplete} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></label>
@@ -1349,6 +1651,17 @@ function App() {
               <div className="optionalNotice">Mercado Libre no informó atributos manuales obligatorios adicionales para esta categoría.</div>
             )}
 
+            {conditionalFields.length > 0 && <>
+              <div className="attributeHeader conditionalHeader">
+                <div>
+                  <h3>Datos que Mercado Libre puede exigir</h3>
+                  <p className="helper blockHelper">Dependen del contexto real de la publicación. Los dejamos visibles porque Mercado Libre puede volverlos obligatorios al validar, aunque la categoría no los marque como requeridos para todos los productos.</p>
+                </div>
+                <span className="conditionalBadge">Validación dinámica</span>
+              </div>
+              <div className="grid3 conditionalGrid">{conditionalFields.map(field => renderAttributeField(field))}</div>
+            </>}
+
             {recommendedFields.length > 0 && <>
               <div className="attributeHeader qualityHeader">
                 <div>
@@ -1371,7 +1684,7 @@ function App() {
             </div>}
           </>}
           <button
-            disabled={!contextComplete || categoryContractLoading || !requiredAttributesComplete || busy}
+            disabled={!contextComplete || categoryContractLoading || shippingCapabilitiesLoading || !shippingReady || !requiredAttributesComplete || busy}
             onClick={()=>run(batchId && drafts.length > 0 ? saveCorrectionsAndRevalidate : createProduct)}
           >
             {batchId && drafts.length > 0

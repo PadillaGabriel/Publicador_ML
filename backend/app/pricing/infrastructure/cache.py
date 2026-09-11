@@ -15,12 +15,17 @@ class PricingCacheKey:
     """Every input that can change a marketplace pricing simulation result."""
 
     account_id: UUID
+    site_id: str
     category_or_item_id: str
     listing_type_id: str
+    currency_id: str
+    condition: str
     gross_price: Decimal
     logistic_type: str
     shipping_mode: str
-    billable_weight: Decimal
+    dimensions: str
+    package_weight_grams: Decimal
+    free_shipping: bool
 
 
 class PricingSimulationCache:

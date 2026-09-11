@@ -22,9 +22,10 @@ export function PricingProfileEditor({ profile, busy, onChange, onSave }: Props)
   const removeComponent = (index: number) => update({ components: profile.components.filter((_, position) => position !== index) });
 
   return <>
-    <header><div><h1>Costos y rentabilidad</h1><p>Configurá los valores globales del canal. Los ajustes cargados en una simulación sólo se aplican a ese cálculo.</p></div></header>
+    <header><div><h1>Costos y rentabilidad</h1><p>Definí una sola vez la política económica del negocio. La Calculadora y el Publicador usan estos valores automáticamente.</p></div></header>
+    <div className="pricingProviderNotice"><b>Mercado Libre se consulta automáticamente</b><span>Comisión, cargo fijo, financiación y logística dependen del producto, categoría, modalidad y precio. No hace falta cargarlos manualmente.</span></div>
     <section className="card">
-      <div className="sectionTitle"><span>1</span> Perfil económico del canal</div>
+      <div className="sectionTitle"><span>1</span> Política de rentabilidad</div>
       <div className="grid3">
         <label>Nombre del perfil<input value={profile.name} onChange={event => update({ name: event.target.value })} /></label>
         <label>Margen objetivo %<input type="number" min="0" max="99" step="0.1" value={profile.target_margin_pct} onChange={event => update({ target_margin_pct: numberOrZero(event.target.value) })} /></label>
@@ -43,8 +44,8 @@ export function PricingProfileEditor({ profile, busy, onChange, onSave }: Props)
       </div>
     </section>
     <section className="card">
-      <div className="toolbar pricingToolbar"><div><div className="sectionTitle"><span>2</span> Variables de costo</div><p className="helper blockHelper">Cada componente conserva explícitamente su base de cálculo.</p></div><button className="secondary" type="button" onClick={addComponent}>+ Agregar variable</button></div>
-      {profile.components.length === 0 && <div className="optionalNotice">Todavía no configuraste componentes adicionales.</div>}
+      <div className="toolbar pricingToolbar"><div><div className="sectionTitle"><span>2</span> Otros costos del negocio</div><p className="helper blockHelper">Agregá acá los costos que no provienen automáticamente de Mercado Libre. Cada componente conserva explícitamente su base de cálculo.</p></div><button className="secondary" type="button" onClick={addComponent}>+ Agregar costo</button></div>
+      {profile.components.length === 0 && <div className="optionalNotice">No hay costos adicionales configurados. Mercado Libre seguirá aportando comisión, cargos y logística según cada producto.</div>}
       <div className="pricingComponents">{profile.components.map((component, index) => <div className="pricingComponent" key={`${component.name}-${index}`}>
         <label>Concepto<input value={component.name} onChange={event => updateComponent(index, { name: event.target.value })} /></label>
         <label>Tipo<select value={component.kind} onChange={event => updateComponent(index, { kind: event.target.value as PricingCostComponent["kind"] })}><option value="PERCENTAGE_OF_PRICE">% sobre precio</option><option value="PERCENTAGE_OF_COST">% sobre costo</option><option value="FIXED_PER_UNIT">Fijo por unidad</option><option value="FIXED_PER_ORDER">Fijo por pedido</option><option value="FIXED_MONTHLY">Fijo mensual</option></select></label>
@@ -52,7 +53,7 @@ export function PricingProfileEditor({ profile, busy, onChange, onSave }: Props)
         <label>{component.kind.startsWith("PERCENTAGE") ? "Porcentaje %" : "Importe ARS"}<input type="number" min="0" step="0.01" value={component.value} onChange={event => updateComponent(index, { value: numberOrZero(event.target.value) })} /></label>
         <label className="checkboxLabel pricingActive"><input type="checkbox" checked={component.active} onChange={event => updateComponent(index, { active: event.target.checked })} />Activo</label><button className="tiny dangerButton" type="button" onClick={() => removeComponent(index)}>Quitar</button>
       </div>)}</div>
-      <button disabled={busy || !profile.name.trim()} type="button" onClick={onSave}>Guardar configuración económica</button>
+      <button disabled={busy || !profile.name.trim()} type="button" onClick={onSave}>Guardar política económica</button>
     </section>
     <section className="card pricingMethod">
       <div className="sectionTitle"><span>3</span> Criterio del motor</div>

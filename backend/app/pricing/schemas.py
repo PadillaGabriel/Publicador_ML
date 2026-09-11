@@ -68,6 +68,7 @@ class PackageInput(BaseModel):
     weight: Decimal | None = Field(default=None, gt=0)
     logistic_type: str | None = Field(default=None, max_length=80)
     shipping_mode: str | None = Field(default=None, max_length=80)
+    free_shipping: bool | None = None
 
 
 class PricingSimulationRequest(BaseModel):
@@ -85,7 +86,17 @@ class PricingSimulationRequest(BaseModel):
     ads_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     refund_rate_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     package: PackageInput | None = None
+    condition: str = Field(default="new", min_length=1, max_length=40)
     currency_id: str = Field(default="ARS", min_length=3, max_length=10)
+
+
+class QuantityTierInput(BaseModel):
+    min_purchase_unit: int = Field(gt=1)
+    amount: Decimal = Field(gt=0)
+
+
+class QuantityPricingSimulationRequest(PricingSimulationRequest):
+    tiers: list[QuantityTierInput] = Field(min_length=1, max_length=5)
 
 
 class NewProductPricingRequest(BaseModel):
@@ -99,6 +110,7 @@ class NewProductPricingRequest(BaseModel):
     target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     overrides: EconomicOverrides = Field(default_factory=EconomicOverrides)
     package: PackageInput | None = None
+    condition: str = Field(default="new", min_length=1, max_length=40)
     currency_id: str = Field(default="ARS", min_length=3, max_length=10)
 
 
@@ -158,6 +170,30 @@ class PricingAuditResponse(BaseModel):
     marketplace_context: dict[str, str | Decimal]
     analyzed_price: Decimal
     scenario_units: int
+    target_margin_pct: Decimal
+    target_margin_source: str
+    minimum_margin_pct: Decimal
+    recommended_target_margin_pct: Decimal
+    rounding_step: Decimal
+
+
+class QuantityTierAnalysisResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    min_purchase_unit: int
+    amount: Decimal
+    analyzed: EconomicResultResponse
+    status: Literal["VIABLE", "BAJO_MINIMO"]
+    minimum_price: Decimal
+    target_price: Decimal
+
+
+class QuantityPricingResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    minimum: PriceTargetResponse
+    target: PriceTargetResponse
+    tiers: list[QuantityTierAnalysisResponse]
 
 
 class PricingCalculatorResponse(BaseModel):
@@ -169,6 +205,9 @@ class PricingCalculatorResponse(BaseModel):
     mc0: PriceTargetResponse
     mc15: PriceTargetResponse
     mc20: PriceTargetResponse
+    minimum: PriceTargetResponse
+    target: PriceTargetResponse
     custom: PriceTargetResponse | None
     recommended_price: Decimal
+    breakdowns: dict[str, EconomicResultResponse]
     audit: PricingAuditResponse
