@@ -55,6 +55,30 @@ class ProductMaster(Base):
     )
 
 
+class ProductTechnicalAttribute(Base):
+    __tablename__ = "product_technical_attributes"
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    product_master_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("product_masters.id", ondelete="CASCADE"), index=True
+    )
+    attribute_id: Mapped[str] = mapped_column(String(80), index=True)
+    value: Mapped[dict] = mapped_column(JSONB)
+    source_category_id: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    source_kind: Mapped[str] = mapped_column(String(40))
+    source_reference: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utcnow, onupdate=utcnow
+    )
+    __table_args__ = (
+        UniqueConstraint(
+            "product_master_id",
+            "attribute_id",
+            name="uq_product_technical_attribute",
+        ),
+    )
+
+
 class ProductVersion(Base):
     __tablename__ = "product_versions"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from app.audit.service import audit
 from app.persistence import ProductMaster, ProductVersion
+from app.technical_attributes.service import upsert_product_attributes
 
 
 def find_product_by_sku(db: Session, internal_sku: str) -> tuple[ProductMaster | None, ProductVersion | None]:
@@ -97,6 +98,15 @@ def save_product_version(db: Session, payload: Any) -> tuple[ProductMaster, Prod
         discovery_context=payload.discovery_context,
     )
     db.add(version)
+    db.flush()
+    upsert_product_attributes(
+        db,
+        product_master_id=master.id,
+        attributes=payload.attributes,
+        source_category_id=payload.category_id,
+        source_kind="PRODUCT_VERSION",
+        source_reference=str(version.id),
+    )
 
     audit(
         db,

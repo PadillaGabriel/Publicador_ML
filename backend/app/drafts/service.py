@@ -1,5 +1,6 @@
 import hashlib
 import logging
+import time
 import uuid
 
 from fastapi import HTTPException
@@ -15,6 +16,7 @@ from app.drafts.image_ordering import generate_image_orders
 from app.drafts.intelligence import score_title, validate_title_set
 from app.integrations.openai.titles import OpenAIProviderError, OpenAITitleGenerator
 from app.keywords.service import KeywordResearchError, build_ml_keyword_snapshot
+from app.technical_attributes.service import upsert_product_attributes
 from app.publication.commercial import (
     WITH_INSTALLMENTS,
     commercial_sequence,
@@ -33,6 +35,7 @@ from app.persistence import (
 )
 
 logger = logging.getLogger("ml-draft-generation")
+performance_logger = logging.getLogger("title-performance")
 
 
 def _max_title_length(category_raw: dict) -> int:
@@ -51,6 +54,7 @@ def generate_drafts(
     count: int,
     commercial_distribution: list[dict] | None = None,
 ) -> DraftBatch:
+    started = time.perf_counter()
     if count < 1 or count > 100:
         raise HTTPException(status_code=422, detail="V1 supports 1..100 drafts per batch.")
 
@@ -237,6 +241,12 @@ def generate_drafts(
     db.commit()
     db.refresh(batch)
     logger.info("draft_generation_completed batch=%s drafts=%d", batch.id, count)
+    performance_logger.info(
+        "title_generation_completed batch=%s drafts=%d total_ms=%d",
+        batch.id,
+        count,
+        round((time.perf_counter() - started) * 1000),
+    )
     return batch
 
 
@@ -317,6 +327,14 @@ def rebase_batch_product_version(
     )
     db.add(corrected)
     db.flush()
+    upsert_product_attributes(
+        db,
+        product_master_id=corrected.product_master_id,
+        attributes=corrected.attributes or {},
+        source_category_id=corrected.category_id,
+        source_kind="PRODUCT_VERSION",
+        source_reference=str(corrected.id),
+    )
 
     image_id_map: dict[str, str] = {}
     for image in sorted(current.images, key=lambda item: item.position):

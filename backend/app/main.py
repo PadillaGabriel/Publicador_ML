@@ -18,6 +18,7 @@ from app.pricing.router import router as pricing_router
 from app.products.router import router as products_router
 from app.publication.router import router as publication_router
 from app.title_intelligence.router import router as title_intelligence_router
+from app.technical_attributes.router import router as technical_attributes_router
 
 configure_logging()
 settings = get_settings()
@@ -44,6 +45,7 @@ app.include_router(drafts_router)
 app.include_router(publication_router)
 app.include_router(jobs_router)
 app.include_router(title_intelligence_router)
+app.include_router(technical_attributes_router)
 
 
 @app.get("/health")

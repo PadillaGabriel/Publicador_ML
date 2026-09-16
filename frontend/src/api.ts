@@ -1,3 +1,4 @@
+import type {ImportTechnicalAttributesResult, ReuseTechnicalAttributesResult} from "./technical-attributes/types";
 import type { ShippingCapabilities } from "./pricing/types";
 
 const configuredBase = (import.meta.env.VITE_API_URL || "").trim();
@@ -131,5 +132,30 @@ export function loadShippingCapabilities(
 ): Promise<ShippingCapabilities> {
   return api<ShippingCapabilities>(
     `/api/publication/shipping-options?account_id=${encodeURIComponent(accountId)}&category_id=${encodeURIComponent(categoryId)}`
+  );
+}
+
+export function importTechnicalAttributes(
+  productId: string,
+  accountId: string,
+  itemId: string,
+): Promise<ImportTechnicalAttributesResult> {
+  return api<ImportTechnicalAttributesResult>(
+    `/api/products/${encodeURIComponent(productId)}/technical-attributes/import-mla`,
+    {
+      method: "POST",
+      body: JSON.stringify({account_id: accountId, item_id: itemId}),
+    },
+  );
+}
+
+export function loadReusableTechnicalAttributes(
+  productId: string,
+  accountId: string,
+  categoryId: string,
+): Promise<ReuseTechnicalAttributesResult> {
+  const query = new URLSearchParams({account_id: accountId, category_id: categoryId});
+  return api<ReuseTechnicalAttributesResult>(
+    `/api/products/${encodeURIComponent(productId)}/technical-attributes/reuse?${query.toString()}`,
   );
 }

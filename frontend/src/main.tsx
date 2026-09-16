@@ -1,10 +1,12 @@
-import React, {useEffect, useMemo, useState} from "react";
+import React, {useEffect, useMemo, useRef, useState} from "react";
 import {createRoot} from "react-dom/client";
-import {api, downloadFile, jobEvents, loadShippingCapabilities} from "./api";
+import {api, downloadFile, importTechnicalAttributes, jobEvents, loadReusableTechnicalAttributes, loadShippingCapabilities} from "./api";
 import {PriceCalculator} from "./pricing/PriceCalculator";
 import {PricingProfileEditor} from "./pricing/PricingProfileEditor";
 import {normalizeQuantityPricing, type PricingCalculation, type PricingCalculatorPrefill, type PricingProfile, type QuantityPricingAnalysis, type QuantityPricingApiResponse, type ShippingCapabilities} from "./pricing/types";
 import {TitleAssistant} from "./title-intelligence/TitleAssistant";
+import {applyReusableAttributes} from "./technical-attributes/reuse";
+import type {ReuseTechnicalAttributesResult} from "./technical-attributes/types";
 import "./styles.css";
 
 type Account = {
@@ -215,6 +217,12 @@ function App() {
   const [oauthStatus, setOauthStatus] = useState<OAuthStatus | null>(null);
   const [manualAccount, setManualAccount] = useState({nickname: "", token: ""});
   const [existingProduct, setExistingProduct] = useState<ExistingProduct | null>(null);
+  const [productMasterId, setProductMasterId] = useState("");
+  const [mlaImportId, setMlaImportId] = useState("");
+  const [technicalReuse, setTechnicalReuse] = useState<ReuseTechnicalAttributesResult | null>(null);
+  const [reusedAttributeIds, setReusedAttributeIds] = useState<Set<string>>(new Set());
+  const [technicalAttributeBusy, setTechnicalAttributeBusy] = useState(false);
+  const attributesRef = useRef<Record<string, any>>({});
   const [dismissedExistingSku, setDismissedExistingSku] = useState("");
   const [skuLookupBusy, setSkuLookupBusy] = useState(false);
   const [commercialAllocations, setCommercialAllocations] = useState<CommercialAllocation[]>([]);
@@ -246,6 +254,10 @@ function App() {
     price: "0", quantity: "1", count: "6", localPickup: false, warrantyType: "SELLER",
     warrantyDuration: "30", warrantyUnit: "days"
   });
+
+  useEffect(() => {
+    attributesRef.current = attributes;
+  }, [attributes]);
 
   const selectedAccount = useMemo(
     () => accounts.find(account => account.id === accountId),
@@ -439,6 +451,8 @@ function App() {
     setProductIdentifierContract(null);
     setProductIdentifierMode("");
     setAttributes({});
+    setTechnicalReuse(null);
+    setReusedAttributeIds(new Set());
     setCustomAttributeFields({});
     setShowSecondaryAttributes(false);
     setVersionId("");
@@ -516,6 +530,8 @@ function App() {
       setCategoryContractLoading(false);
       setTitleMaxLength(null);
       setAttributes({});
+      setTechnicalReuse(null);
+      setReusedAttributeIds(new Set());
       return () => { cancelled = true; };
     }
     setCategoryContractLoading(true);
@@ -609,8 +625,45 @@ function App() {
   }, [categoryId, accountId]);
 
   useEffect(() => {
+    let cancelled = false;
+    if (!productMasterId || !accountId || !categoryId || fields.length === 0) {
+      return () => { cancelled = true; };
+    }
+
+    loadReusableTechnicalAttributes(productMasterId, accountId, categoryId)
+      .then(result => {
+        if (cancelled) return;
+        setTechnicalReuse(result);
+        const merged = applyReusableAttributes(attributesRef.current, result.reusable);
+        attributesRef.current = merged.attributes;
+        setAttributes(merged.attributes);
+        if (merged.appliedIds.length) {
+          setReusedAttributeIds(current => {
+            const next = new Set(current);
+            merged.appliedIds.forEach(id => next.add(id));
+            return next;
+          });
+        }
+      })
+      .catch(error => {
+        if (!cancelled) setMessage(error.message);
+      });
+
+    return () => { cancelled = true; };
+  }, [productMasterId, accountId, categoryId, fields.length]);
+
+  useEffect(() => {
     const sku = form.sku.trim();
     setExistingProduct(null);
+    setProductMasterId("");
+    setTechnicalReuse(null);
+    setAttributes(current => {
+      if (reusedAttributeIds.size === 0) return current;
+      const next = {...current};
+      reusedAttributeIds.forEach(id => delete next[id]);
+      return next;
+    });
+    setReusedAttributeIds(new Set());
     if (!sku) {
       setDismissedExistingSku("");
       return;
@@ -622,10 +675,13 @@ function App() {
         const result = await api<{found: boolean; product?: ExistingProduct}>(
           `/api/products/lookup?sku=${encodeURIComponent(sku)}`
         );
-        setExistingProduct(result.found && result.product ? result.product : null);
+        const foundProduct = result.found && result.product ? result.product : null;
+        setExistingProduct(foundProduct);
+        setProductMasterId(foundProduct?.id || "");
       } catch {
         // El lookup es una ayuda no bloqueante: un fallo no impide continuar la carga.
         setExistingProduct(null);
+        setProductMasterId("");
       } finally {
         setSkuLookupBusy(false);
       }
@@ -687,6 +743,8 @@ function App() {
 
     setCategoryId(version.category_id);
     setSelectedCategoryName(version.category_id);
+    setTechnicalReuse(null);
+    setReusedAttributeIds(new Set());
     setCategorySuggestions([]);
     setFields([]);
     setProductIdentifierMode("");
@@ -995,6 +1053,7 @@ function App() {
     };
     const result = await api<any>("/api/products", {method:"POST", body:JSON.stringify(payload)});
     setVersionId(result.version_id);
+    setProductMasterId(String(result.product_id || ""));
     setUploadedImages([]);
     setMessage(
       result.created_master
@@ -1232,6 +1291,44 @@ function App() {
     await downloadFile(`/api/publication/jobs/${id}/export.xlsx`, `publicaciones_ml_${id}.xlsx`);
   }
 
+  function updateTechnicalAttribute(attributeId: string, value: any) {
+    setAttributes(current => ({...current, [attributeId]: value}));
+    setReusedAttributeIds(current => {
+      if (!current.has(attributeId)) return current;
+      const next = new Set(current);
+      next.delete(attributeId);
+      return next;
+    });
+  }
+
+  async function importMlaTechnicalSheet() {
+    const itemId = mlaImportId.trim().toUpperCase();
+    if (!productMasterId) throw new Error("Guardá o recuperá primero un SKU para asociar la ficha técnica al producto.");
+    if (!accountId) throw new Error("Seleccioná una cuenta de Mercado Libre.");
+    if (!/^MLA\d+$/.test(itemId)) throw new Error("Ingresá un MLA válido, por ejemplo MLA123456789.");
+
+    setTechnicalAttributeBusy(true);
+    try {
+      const imported = await importTechnicalAttributes(productMasterId, accountId, itemId);
+      setMlaImportId(imported.item_id);
+      if (categoryId && fields.length > 0) {
+        const reuse = await loadReusableTechnicalAttributes(productMasterId, accountId, categoryId);
+        setTechnicalReuse(reuse);
+        const merged = applyReusableAttributes(attributesRef.current, reuse.reusable);
+        attributesRef.current = merged.attributes;
+        setAttributes(merged.attributes);
+        setReusedAttributeIds(current => {
+          const next = new Set(current);
+          merged.appliedIds.forEach(id => next.add(id));
+          return next;
+        });
+      }
+      setMessage(`Ficha ${imported.item_id}: ${imported.imported_count} atributo(s) reutilizables importados y ${imported.skipped_count} omitidos.`);
+    } finally {
+      setTechnicalAttributeBusy(false);
+    }
+  }
+
   async function run<T>(fn: () => Promise<T>) {
     setBusy(true); setMessage("");
     try { await fn(); } catch (e:any) { setMessage(e.message); }
@@ -1254,12 +1351,12 @@ function App() {
     const helper = field.hint || (field.is_measurement ? "Ingresá el valor con la unidad que corresponda según Mercado Libre." : "");
 
     return <label key={field.id} className={`attributeField ${attributeHasValue(field) ? "completed" : ""}`}>
-      <span className="attributeLabel">{field.label}{required && <b className="required"> *</b>}</span>
+      <span className="attributeLabel">{field.label}{required && <b className="required"> *</b>}{reusedAttributeIds.has(field.id) && <em className="reusedAttributeBadge">Reutilizado</em>}</span>
       {field.is_measurement ? (() => {
         const parts = measurementParts(current, field);
         const units = field.allowed_units || [];
         const commit = (numberText: string, unit: string) => {
-          setAttributes({...attributes, [field.id]: buildMeasurementValue(numberText, unit)});
+          updateTechnicalAttribute(field.id, buildMeasurementValue(numberText, unit));
         };
         return <div className="measurementInput">
           <input
@@ -1276,7 +1373,7 @@ function App() {
       })() : field.is_boolean && !field.values?.length ? (
         <select value={typeof current === "object" ? String(current?.value_name || "") : String(current || "")} onChange={e=>{
           const value = e.target.value;
-          setAttributes({...attributes, [field.id]: value ? {value_name:value} : null});
+          updateTechnicalAttribute(field.id, value ? {value_name:value} : null);
         }}>
           <option value="">Seleccionar…</option>
           <option value="Sí">Sí</option>
@@ -1287,12 +1384,12 @@ function App() {
           <select value={selectedValue} onChange={e=>{
             if (e.target.value === "__custom__") {
               setCustomAttributeFields({...customAttributeFields, [field.id]: true});
-              setAttributes({...attributes, [field.id]: ""});
+              updateTechnicalAttribute(field.id, "");
               return;
             }
             const selected = field.values.find(v=>String(v.id || v.name) === e.target.value);
             setCustomAttributeFields({...customAttributeFields, [field.id]: false});
-            setAttributes({...attributes, [field.id]: selected ? {value_id:selected.id, value_name:selected.name} : null});
+            updateTechnicalAttribute(field.id, selected ? {value_id:selected.id, value_name:selected.name} : null);
           }}>
             <option value="">Seleccionar…</option>
             {field.values.slice(0,250).map(v=><option key={String(v.id||v.name)} value={String(v.id||v.name)}>{v.name}</option>)}
@@ -1303,14 +1400,14 @@ function App() {
             maxLength={field.value_max_length || undefined}
             placeholder="Escribir valor manualmente"
             value={typeof current === "string" ? current : ""}
-            onChange={e=>setAttributes({...attributes,[field.id]:e.target.value})}
+            onChange={e=>updateTechnicalAttribute(field.id, e.target.value)}
           />}
         </>
       ) : (
         <input
           maxLength={field.value_max_length || undefined}
           value={typeof current === "string" ? current : ""}
-          onChange={e=>setAttributes({...attributes,[field.id]:e.target.value})}
+          onChange={e=>updateTechnicalAttribute(field.id, e.target.value)}
         />
       )}
       {helper && <small className="helper">{helper}</small>}
@@ -1507,6 +1604,37 @@ function App() {
 
         <section className={`card ${!contextComplete ? "locked" : ""}`}>
           <div className="sectionTitle"><span>2</span> Ficha técnica</div>
+          <div className="technicalReusePanel">
+            <div className="technicalReuseIntro">
+              <div>
+                <h3>Reutilizar ficha técnica</h3>
+                <p className="helper blockHelper">Importá los atributos de un MLA propio. Sólo se completan campos vacíos cuyo ID y valor sean compatibles con la categoría actual; tus datos manuales nunca se pisan.</p>
+              </div>
+              <div className="technicalReuseImport">
+                <input
+                  value={mlaImportId}
+                  disabled={!productMasterId || technicalAttributeBusy}
+                  onChange={e=>setMlaImportId(e.target.value.toUpperCase())}
+                  placeholder="MLA123456789"
+                  aria-label="MLA para importar ficha técnica"
+                />
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!productMasterId || !accountId || technicalAttributeBusy || !/^MLA\d+$/.test(mlaImportId.trim().toUpperCase())}
+                  onClick={()=>run(importMlaTechnicalSheet)}
+                >
+                  {technicalAttributeBusy ? "Importando…" : "Importar ficha desde MLA"}
+                </button>
+              </div>
+            </div>
+            {!productMasterId && <small className="helper">Recuperá un SKU existente o guardá primero la ficha para habilitar la biblioteca técnica de ese producto.</small>}
+            {technicalReuse && <div className="technicalReuseSummary">
+              <span><b>{technicalReuse.reusable.length}</b> reutilizables</span>
+              <span><b>{technicalReuse.pending.length}</b> pendientes</span>
+              <span><b>{technicalReuse.incompatible.length}</b> no aplican</span>
+            </div>}
+          </div>
           {!contextComplete && <div className="lockedMessage">Ingresá el producto, buscá categorías y confirmá una categoría hoja para continuar.</div>}
           <div className="grid3">
             <label>Precio ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>{setForm({...form,price:e.target.value});setPricingAnalysis(null);}}/></label>
