@@ -1,10 +1,50 @@
+import atexit
 from dataclasses import dataclass
+from threading import Lock
 from pathlib import Path
 from urllib.parse import urlencode
 
 import httpx
 
 from app.core.config import get_settings
+
+
+_shared_http_client: httpx.Client | None = None
+_shared_http_client_config: tuple[str, float] | None = None
+_shared_http_client_lock = Lock()
+
+
+def _get_shared_http_client(base_url: str, timeout: float) -> httpx.Client:
+    global _shared_http_client, _shared_http_client_config
+    config = (base_url, timeout)
+    with _shared_http_client_lock:
+        if _shared_http_client is not None and _shared_http_client_config == config:
+            return _shared_http_client
+        if _shared_http_client is not None:
+            _shared_http_client.close()
+        _shared_http_client = httpx.Client(
+            base_url=base_url,
+            timeout=timeout,
+            limits=httpx.Limits(
+                max_connections=100,
+                max_keepalive_connections=20,
+                keepalive_expiry=30.0,
+            ),
+        )
+        _shared_http_client_config = config
+        return _shared_http_client
+
+
+def close_shared_http_client() -> None:
+    global _shared_http_client, _shared_http_client_config
+    with _shared_http_client_lock:
+        if _shared_http_client is not None:
+            _shared_http_client.close()
+        _shared_http_client = None
+        _shared_http_client_config = None
+
+
+atexit.register(close_shared_http_client)
 
 
 class MercadoLibreError(RuntimeError):
@@ -39,12 +79,10 @@ class MercadoLibreClient:
 
     def get(self, path: str, *, extra_headers: dict[str, str] | None = None) -> dict | list:
         try:
-            with httpx.Client(
-                base_url=self._base_url,
-                timeout=self._timeout,
+            response = _get_shared_http_client(self._base_url, self._timeout).get(
+                path,
                 headers={**self._headers(), **(extra_headers or {})},
-            ) as client:
-                response = client.get(path)
+            )
         except httpx.TimeoutException as exc:
             raise MercadoLibreError("Mercado Libre request timed out.") from exc
         except httpx.RequestError as exc:
@@ -54,12 +92,11 @@ class MercadoLibreClient:
 
     def post(self, path: str, payload: dict) -> PublishResponse:
         try:
-            with httpx.Client(
-                base_url=self._base_url,
-                timeout=self._timeout,
+            response = _get_shared_http_client(self._base_url, self._timeout).post(
+                path,
+                json=payload,
                 headers={**self._headers(), "Content-Type": "application/json"},
-            ) as client:
-                response = client.post(path, json=payload)
+            )
         except httpx.TimeoutException as exc:
             raise MercadoLibreError("Mercado Libre publish request timed out.") from exc
         except httpx.RequestError as exc:
@@ -161,14 +198,11 @@ class MercadoLibreClient:
 
         path = Path(file_path)
         try:
-            with path.open("rb") as file_handle, httpx.Client(
-                base_url=self._base_url,
-                timeout=self._timeout,
-                headers=self._headers(),
-            ) as client:
-                response = client.post(
+            with path.open("rb") as file_handle:
+                response = _get_shared_http_client(self._base_url, self._timeout).post(
                     "/pictures/items/upload",
                     files={"file": (path.name, file_handle, mime_type)},
+                    headers=self._headers(),
                 )
         except OSError as exc:
             raise MercadoLibreError(f"No se pudo leer la imagen local: {path.name}.", 422) from exc
@@ -196,6 +230,12 @@ class MercadoLibreClient:
 
     def create_item_description(self, item_id: str, plain_text: str) -> PublishResponse:
         return self.post(f"/items/{item_id}/description", {"plain_text": plain_text})
+
+    def item_description(self, item_id: str) -> dict:
+        value = self.get(f"/items/{item_id}/description")
+        if not isinstance(value, dict):
+            raise MercadoLibreError("Unexpected item description response.")
+        return value
 
     def item(self, item_id: str) -> dict:
         value = self.get(f"/items/{item_id}")

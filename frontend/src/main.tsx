@@ -516,9 +516,10 @@ function App() {
   useEffect(() => {
     setQuantityPricingAnalysis(null);
   }, [
-    accountId, categoryId, pricingListingTypeId, productCost,
+    accountId, categoryId, pricingListingTypeId, productCost, form.price,
     simulationPackage.dimensions, simulationPackage.weight, simulationPackage.logisticType,
-    simulationPackage.shippingMode, simulationPackage.freeShipping, pricingAnalysis, quantityPrices,
+    simulationPackage.shippingMode, simulationPackage.freeShipping, pricingAnalysis,
+    quantityPrices.map(tier => tier.min_purchase_unit).join(","),
   ]);
 
   useEffect(() => {
@@ -920,16 +921,24 @@ function App() {
       throw new Error("Completá cuenta, categoría y modalidad antes de analizar precios mayoristas.");
     }
     if (!quantityPrices.length) throw new Error("Agregá al menos un escalón mayorista.");
-    const invalidTier = quantityPrices.some(tier => tier.min_purchase_unit <= 1 || tier.amount <= 0);
-    if (invalidTier) throw new Error("Completá cantidades mayores a 1 y precios unitarios mayores a 0.");
+    const invalidTier = quantityPrices.some(tier => tier.min_purchase_unit <= 1);
+    if (invalidTier) throw new Error("Completá cantidades mayores a 1.");
     const response = await api<QuantityPricingApiResponse>("/api/pricing/quantity-tiers", {
       method: "POST",
       body: JSON.stringify({
         ...publisherPricingPayload(Number(form.price) > 0 ? Number(form.price) : null),
-        tiers: quantityPrices,
+        tiers: quantityPrices.map(tier => ({min_purchase_unit: tier.min_purchase_unit})),
       }),
     });
-    setQuantityPricingAnalysis(normalizeQuantityPricing(response));
+    const normalized = normalizeQuantityPricing(response);
+    setQuantityPricingAnalysis(normalized);
+    setQuantityPrices(current => current.map((tier, index) => {
+      const analysis = normalized.tiers[index];
+      return {
+        ...tier,
+        amount: analysis?.status === "OPTIMO" ? analysis.amount : 0,
+      };
+    }));
   }
 
   function transferRecommendedPrice(price: number, calculation: PricingCalculation) {
@@ -1060,6 +1069,12 @@ function App() {
 
   async function createProduct() {
     if (!accountId || !categoryId) throw new Error("Elegí cuenta y una categoría hoja sugerida por Mercado Libre.");
+    if (quantityPricingEnabled) {
+      if (!quantityPrices.length) throw new Error("Agregá al menos un escalón mayorista.");
+      if (quantityPrices.some(tier => tier.min_purchase_unit <= 1 || tier.amount <= 0)) {
+        throw new Error("Calculá precios mayoristas óptimos antes de guardar el producto.");
+      }
+    }
     if (!form.sku.trim() || !form.name.trim()) throw new Error("Completá SKU y nombre interno.");
     if (categoryContractLoading) {
       throw new Error("Esperá a que termine de cargar el contrato de categoría de Mercado Libre.");
@@ -1357,6 +1372,7 @@ function App() {
         sku: seed.sku,
         name: seed.name,
         title: seed.title,
+        description: seed.description,
         brand: seed.brand,
         model: seed.model,
       }));
@@ -1815,15 +1831,15 @@ function App() {
                 {quantityPrices.map((tier,index)=>{
                   const analysis = quantityPricingAnalysis?.tiers[index];
                   return <div className="quantityPriceRow" key={index}>
-                    <label>Desde<input type="number" min="2" value={tier.min_purchase_unit} onChange={e=>updateQuantityPriceTier(index,{min_purchase_unit:Number(e.target.value)})}/></label>
-                    <label>Precio unitario ARS<input type="number" min="0.01" step="0.01" value={tier.amount || ""} onChange={e=>updateQuantityPriceTier(index,{amount:Number(e.target.value)})} placeholder="Definí el precio"/></label>
+                    <label>Desde<input type="number" min="2" value={tier.min_purchase_unit} onChange={e=>updateQuantityPriceTier(index,{min_purchase_unit:Number(e.target.value),amount:0})}/></label>
+                    <label>Precio óptimo unitario ARS<input type="number" value={tier.amount || ""} readOnly placeholder="Se calcula automáticamente"/></label>
                     <div className="quantityTierEconomics">
                       {analysis ? <>
-                        <span className={`tierRisk ${analysis.status === "VIABLE" ? "ok" : "bad"}`}>{analysis.status === "VIABLE" ? "VIABLE" : "BAJO MÍNIMO"}</span>
+                        <span className={`tierRisk ${analysis.status === "OPTIMO" ? "ok" : "bad"}`}>{analysis.status === "OPTIMO" ? "ÓPTIMO" : "SIN VENTAJA"}</span>
                         <small>MC estimado: <b>{analysis.contributionMarginPct}%</b> · {money(analysis.contributionMargin)}</small>
-                        <small>Piso económico: <b>{money(analysis.minimumPrice)}</b> · Objetivo: <b>{money(analysis.targetPrice)}</b></small>
-                        <button type="button" className="tiny secondary" onClick={()=>updateQuantityPriceTier(index,{amount:analysis.targetPrice})}>Usar precio objetivo</button>
-                      </> : <small>Analizá el escalón para conocer su margen y los límites económicos.</small>}
+                        <small>Minorista: <b>{money(analysis.retailPrice)}</b> · Piso económico: <b>{money(analysis.minimumPrice)}</b></small>
+                        <small>{analysis.status === "OPTIMO" ? <>Descuento sostenible máximo: <b>{analysis.discountPct}%</b></> : <>No existe un descuento sostenible frente al precio minorista actual.</>}</small>
+                      </> : <small>El precio se calcula automáticamente usando el margen mínimo configurado.</small>}
                     </div>
                     <button type="button" className="tiny dangerButton" onClick={()=>removeQuantityPriceTier(index)}>Eliminar</button>
                   </div>;
@@ -1831,9 +1847,9 @@ function App() {
               </div>
               <div className="quantityPricingActions">
                 <button type="button" className="secondary" disabled={quantityPrices.length >= 5} onClick={addQuantityPriceTier}>+ Agregar escalón mayorista</button>
-                <button type="button" className="secondary" disabled={!pricingConfigured || !quantityPrices.length || busy} onClick={()=>run(simulateQuantityPrices)}>Analizar precios mayoristas</button>
+                <button type="button" className="secondary" disabled={!pricingConfigured || !quantityPrices.length || busy} onClick={()=>run(simulateQuantityPrices)}>Calcular precios óptimos</button>
               </div>
-              <small className="helper">Máximo 5 escalones. No se aplica ningún descuento automático: definí cada precio y validalo contra el mismo motor económico del Publicador.</small>
+              <small className="helper">Máximo 5 escalones. El sistema busca el precio unitario más bajo que conserva el margen mínimo configurado; no aplica porcentajes de descuento arbitrarios.</small>
             </>}
           </div>
           <label>Descripción<textarea disabled={!contextComplete} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></label>

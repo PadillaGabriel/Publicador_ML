@@ -235,6 +235,8 @@ def test_preview_mla_does_not_require_product_and_returns_publication_context(mo
     client.item.return_value = item
     monkeypatch.setattr(service, "MercadoLibreClient", lambda _token: client)
 
+    client.item_description.return_value = {"plain_text": "Descripción original del producto"}
+
     result = service.preview_mla(db, account=account, item_id="mla123")
 
     assert result.item_id == "MLA123"
@@ -242,6 +244,7 @@ def test_preview_mla_does_not_require_product_and_returns_publication_context(mo
     assert result.category_id == "MLA1000"
     assert result.condition == "new"
     assert result.seller_sku == "SKU-123"
+    assert result.description == "Descripción original del producto"
     assert [row.attribute_id for row in result.attributes] == ["BRAND", "MATERIAL"]
     db.add.assert_not_called()
     db.commit.assert_not_called()

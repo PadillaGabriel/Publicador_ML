@@ -92,7 +92,6 @@ class PricingSimulationRequest(BaseModel):
 
 class QuantityTierInput(BaseModel):
     min_purchase_unit: int = Field(gt=1)
-    amount: Decimal = Field(gt=0)
 
 
 class QuantityPricingSimulationRequest(PricingSimulationRequest):
@@ -183,9 +182,10 @@ class QuantityTierAnalysisResponse(BaseModel):
     min_purchase_unit: int
     amount: Decimal
     analyzed: EconomicResultResponse
-    status: Literal["VIABLE", "BAJO_MINIMO"]
+    status: Literal["OPTIMO", "SIN_VENTAJA"]
     minimum_price: Decimal
-    target_price: Decimal
+    retail_price: Decimal
+    discount_pct: Decimal
 
 
 class QuantityPricingResponse(BaseModel):
@@ -193,6 +193,7 @@ class QuantityPricingResponse(BaseModel):
 
     minimum: PriceTargetResponse
     target: PriceTargetResponse
+    retail_price: Decimal
     tiers: list[QuantityTierAnalysisResponse]
 
 

@@ -100,11 +100,12 @@ def _load_mla_item(
     *,
     account: MercadoLibreAccount,
     item_id: str,
-) -> tuple[str, dict]:
+) -> tuple[str, dict, MercadoLibreClient]:
     normalized_item_id = _normalize_item_id(item_id)
     token = load_access_token(db, account.id)
+    client = MercadoLibreClient(token)
     try:
-        item = MercadoLibreClient(token).item(normalized_item_id)
+        item = client.item(normalized_item_id)
     except MercadoLibreError as exc:
         if exc.status_code == 404:
             raise HTTPException(status_code=404, detail="El MLA no existe o no es accesible con la cuenta seleccionada.") from exc
@@ -120,7 +121,18 @@ def _load_mla_item(
     if item_seller and account_seller and item_seller != account_seller:
         raise HTTPException(status_code=422, detail="El MLA no pertenece a la cuenta seleccionada.")
 
-    return normalized_item_id, item
+    return normalized_item_id, item, client
+
+
+def _item_description(client: MercadoLibreClient, item_id: str) -> str | None:
+    try:
+        payload = client.item_description(item_id)
+    except MercadoLibreError as exc:
+        if exc.status_code == 404:
+            return None
+        raise HTTPException(status_code=502, detail="Mercado Libre no pudo devolver la descripción de la publicación.") from exc
+    value = str(payload.get("plain_text") or "").strip()
+    return value or None
 
 
 def _technical_records_from_item(
@@ -177,11 +189,12 @@ def preview_mla(
     item_id: str,
 ) -> MlaPublicationSnapshot:
     """Read an owned ML publication without creating or mutating a ProductMaster."""
-    normalized_item_id, item = _load_mla_item(db, account=account, item_id=item_id)
+    normalized_item_id, item, client = _load_mla_item(db, account=account, item_id=item_id)
     imported, skipped = _technical_records_from_item(item=item, item_id=normalized_item_id)
     return MlaPublicationSnapshot(
         item_id=normalized_item_id,
         title=str(item.get("title") or "").strip(),
+        description=_item_description(client, normalized_item_id),
         category_id=str(item.get("category_id") or "").strip() or None,
         condition=str(item.get("condition") or "").strip() or None,
         seller_sku=_seller_sku(item),

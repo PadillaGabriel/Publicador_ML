@@ -20,6 +20,7 @@ export type ReuseTechnicalAttributesResult = {
 export type MlaPublicationSnapshot = {
   item_id: string;
   title: string;
+  description?: string | null;
   category_id?: string | null;
   condition?: string | null;
   seller_sku?: string | null;

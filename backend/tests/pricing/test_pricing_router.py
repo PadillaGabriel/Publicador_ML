@@ -176,14 +176,16 @@ def test_quantity_tiers_endpoint_uses_pricing_service_without_publication_side_e
             return QuantityPricingResponse(
                 minimum=base.minimum,
                 target=base.target,
+                retail_price=request.sale_price or base.target.gross_price,
                 tiers=tuple(
                     QuantityTierAnalysis(
                         min_purchase_unit=tier.min_purchase_unit,
-                        amount=tier.amount,
+                        amount=base.minimum.gross_price,
                         analyzed=base.analyzed,
-                        status="VIABLE",
+                        status="OPTIMO",
                         minimum_price=base.minimum.gross_price,
-                        target_price=base.target.gross_price,
+                        retail_price=request.sale_price or base.target.gross_price,
+                        discount_pct=Decimal("12"),
                     )
                     for tier in tiers
                 ),
@@ -210,15 +212,16 @@ def test_quantity_tiers_endpoint_uses_pricing_service_without_publication_side_e
                 "logistic_type": "cross_docking", "shipping_mode": "me2", "free_shipping": False,
             },
             "tiers": [
-                {"min_purchase_unit": 3, "amount": "22000"},
-                {"min_purchase_unit": 6, "amount": "20000"},
+                {"min_purchase_unit": 3},
+                {"min_purchase_unit": 6},
             ],
         },
     )
 
     assert response.status_code == 200
     assert response.json()["tiers"][0]["min_purchase_unit"] == 3
-    assert response.json()["tiers"][0]["status"] == "VIABLE"
+    assert response.json()["tiers"][0]["status"] == "OPTIMO"
+    assert response.json()["retail_price"] == "25000"
     assert publication.calls == 0
 
 

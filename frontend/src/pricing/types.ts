@@ -93,14 +93,16 @@ export type QuantityTierAnalysis = {
   amount: number;
   contributionMargin: number;
   contributionMarginPct: number;
-  status: "VIABLE" | "BAJO_MINIMO";
+  status: "OPTIMO" | "SIN_VENTAJA";
   minimumPrice: number;
-  targetPrice: number;
+  retailPrice: number;
+  discountPct: number;
 };
 
 export type QuantityPricingAnalysis = {
   minimum: PricingTarget;
   target: PricingTarget;
+  retailPrice: number;
   tiers: QuantityTierAnalysis[];
 };
 
@@ -174,13 +176,15 @@ function toTarget(target: ApiTarget): PricingTarget {
 export type QuantityPricingApiResponse = {
   minimum: ApiTarget;
   target: ApiTarget;
+  retail_price: number;
   tiers: Array<{
     min_purchase_unit: number;
     amount: number;
     analyzed: ApiEconomicResult;
-    status: "VIABLE" | "BAJO_MINIMO";
+    status: "OPTIMO" | "SIN_VENTAJA";
     minimum_price: number;
-    target_price: number;
+    retail_price: number;
+    discount_pct: number;
   }>;
 };
 
@@ -188,6 +192,7 @@ export function normalizeQuantityPricing(response: QuantityPricingApiResponse): 
   return {
     minimum: toTarget(response.minimum),
     target: toTarget(response.target),
+    retailPrice: numberValue(response.retail_price),
     tiers: response.tiers.map(tier => ({
       minPurchaseUnit: tier.min_purchase_unit,
       amount: numberValue(tier.amount),
@@ -195,7 +200,8 @@ export function normalizeQuantityPricing(response: QuantityPricingApiResponse): 
       contributionMarginPct: numberValue(tier.analyzed.contribution_margin_pct),
       status: tier.status,
       minimumPrice: numberValue(tier.minimum_price),
-      targetPrice: numberValue(tier.target_price),
+      retailPrice: numberValue(tier.retail_price),
+      discountPct: numberValue(tier.discount_pct),
     })),
   };
 }

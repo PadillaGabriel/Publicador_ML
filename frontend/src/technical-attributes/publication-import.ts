@@ -21,6 +21,7 @@ export function buildImportedProductSeed(snapshot: MlaPublicationSnapshot) {
     sku: String(snapshot.seller_sku || "").trim(),
     name: title,
     title,
+    description: String(snapshot.description || "").trim(),
     brand: attributeText(snapshot.attributes, "BRAND"),
     model: attributeText(snapshot.attributes, "MODEL"),
     categoryId: String(snapshot.category_id || "").trim(),

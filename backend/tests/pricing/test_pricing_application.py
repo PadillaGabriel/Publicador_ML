@@ -659,14 +659,15 @@ def test_profile_rounding_step_is_applied_to_optimizer_prices():
     assert response.audit.rounding_step == Decimal("100")
 
 
-def test_quantity_tiers_use_same_pricing_engine_and_profile_guardrails():
-    """Catches PxQ being evaluated with a separate MC0-only formula."""
+def test_quantity_tiers_calculate_lowest_sustainable_unit_price_from_minimum_margin():
+    """PxQ must optimize from the configured minimum margin, not from arbitrary discounts."""
     service = PricingCalculatorService(profile=calculator_profile(), provider=CalculatorProvider())
     request = NewProductPricingRequest(
         account_id=uuid4(),
         category_id="MLA412517",
         listing_type_id="gold_special",
         gross_cmv=Decimal("12100"),
+        sale_price=Decimal("25000"),
         package=PackageInput(
             dimensions="10x10x10", weight=Decimal("0.45"),
             logistic_type="cross_docking", shipping_mode="me2", free_shipping=False,
@@ -676,16 +677,42 @@ def test_quantity_tiers_use_same_pricing_engine_and_profile_guardrails():
     response = service.calculate_quantity_tiers(
         request,
         [
-            QuantityTierInput(min_purchase_unit=3, amount=Decimal("21000")),
-            QuantityTierInput(min_purchase_unit=6, amount=Decimal("18000")),
+            QuantityTierInput(min_purchase_unit=3),
+            QuantityTierInput(min_purchase_unit=6),
         ],
     )
 
     assert response.minimum.target_margin_pct == Decimal("10")
-    assert response.target.target_margin_pct == Decimal("20")
+    assert response.retail_price == Decimal("25000")
     assert [tier.min_purchase_unit for tier in response.tiers] == [3, 6]
-    assert response.tiers[0].analyzed.gross_price == Decimal("21000.00")
-    assert response.tiers[0].status == "VIABLE"
-    assert response.tiers[1].status == "BAJO_MINIMO"
-    assert response.tiers[0].minimum_price == response.minimum.gross_price
-    assert response.tiers[0].target_price == response.target.gross_price
+    for tier in response.tiers:
+        assert tier.amount == response.minimum.gross_price
+        assert tier.analyzed.gross_price == response.minimum.gross_price
+        assert tier.analyzed.contribution_margin_pct >= Decimal("10")
+        assert tier.status == "OPTIMO"
+        assert tier.discount_pct > 0
+
+
+def test_quantity_tiers_report_no_sustainable_advantage_when_retail_is_at_or_below_floor():
+    service = PricingCalculatorService(profile=calculator_profile(), provider=CalculatorProvider())
+    request = NewProductPricingRequest(
+        account_id=uuid4(),
+        category_id="MLA412517",
+        listing_type_id="gold_special",
+        gross_cmv=Decimal("12100"),
+        sale_price=Decimal("10000"),
+        package=PackageInput(
+            dimensions="10x10x10", weight=Decimal("0.45"),
+            logistic_type="cross_docking", shipping_mode="me2", free_shipping=False,
+        ),
+    )
+
+    response = service.calculate_quantity_tiers(
+        request,
+        [QuantityTierInput(min_purchase_unit=3)],
+    )
+
+    tier = response.tiers[0]
+    assert tier.status == "SIN_VENTAJA"
+    assert tier.discount_pct == Decimal("0")
+    assert tier.amount == response.minimum.gross_price

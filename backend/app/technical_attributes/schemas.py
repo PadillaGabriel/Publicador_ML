@@ -42,6 +42,7 @@ class TechnicalAttributeRecord(BaseModel):
 class MlaPublicationSnapshot(BaseModel):
     item_id: str
     title: str
+    description: str | None = None
     category_id: str | None = None
     condition: str | None = None
     seller_sku: str | None = None

@@ -1,5 +1,8 @@
 """Pricing-calculator application use cases without publication side effects."""
 
+import logging
+import time
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from decimal import ROUND_CEILING, Decimal
@@ -19,6 +22,7 @@ from app.pricing.domain import (
     evaluate_economics,
 )
 from app.pricing.domain.models import MarketplaceEconomics
+from app.pricing.quantity_pricing import quote_optimal_quantity_price
 from app.pricing.infrastructure.mercadolibre import (
     ExistingListingContext,
     MarketplaceSimulationContext,
@@ -29,6 +33,8 @@ from app.pricing.schemas import (
     PackageInput,
     QuantityTierInput,
 )
+
+performance_logger = logging.getLogger("pricing-performance")
 
 HUNDRED = Decimal(100)
 
@@ -58,15 +64,17 @@ class QuantityTierAnalysis:
     min_purchase_unit: int
     amount: Decimal
     analyzed: EconomicResult
-    status: Literal["VIABLE", "BAJO_MINIMO"]
+    status: Literal["OPTIMO", "SIN_VENTAJA"]
     minimum_price: Decimal
-    target_price: Decimal
+    retail_price: Decimal
+    discount_pct: Decimal
 
 
 @dataclass(frozen=True, slots=True)
 class QuantityPricingResponse:
     minimum: PriceTargetResult
     target: PriceTargetResult
+    retail_price: Decimal
     tiers: tuple[QuantityTierAnalysis, ...]
 
 
@@ -162,22 +170,35 @@ class PricingCalculatorService:
 
         minimum = solve_target(self._profile.minimum_margin_pct)
         target = solve_target(target_margin)
+        retail_price = request.sale_price or max(target.gross_price, minimum.gross_price)
+        quote = quote_optimal_quantity_price(
+            retail_price=retail_price,
+            minimum_sustainable_price=minimum.gross_price,
+        )
+        optimal_economics = evaluate(quote.amount)
+        if optimal_economics.contribution_margin_pct < self._profile.minimum_margin_pct:
+            raise PricingDomainError(
+                "OBJETIVO_NO_CONVERGE",
+                "The optimized wholesale price does not satisfy the configured minimum margin.",
+            )
         analyzed_tiers = tuple(
             QuantityTierAnalysis(
                 min_purchase_unit=tier.min_purchase_unit,
-                amount=tier.amount,
-                analyzed=(analyzed := evaluate(tier.amount)),
-                status=(
-                    "VIABLE"
-                    if analyzed.contribution_margin_pct >= self._profile.minimum_margin_pct
-                    else "BAJO_MINIMO"
-                ),
+                amount=quote.amount,
+                analyzed=optimal_economics,
+                status=quote.status,
                 minimum_price=minimum.gross_price,
-                target_price=target.gross_price,
+                retail_price=retail_price,
+                discount_pct=quote.discount_pct,
             )
             for tier in tiers
         )
-        return QuantityPricingResponse(minimum=minimum, target=target, tiers=analyzed_tiers)
+        return QuantityPricingResponse(
+            minimum=minimum,
+            target=target,
+            retail_price=retail_price,
+            tiers=analyzed_tiers,
+        )
 
     def calculate_existing_listing(
         self, request: ExistingListingPricingRequest
@@ -236,6 +257,8 @@ class PricingCalculatorService:
         context: MarketplaceSimulationContext,
         seed_price: Decimal,
     ) -> PricingCalculationResponse:
+        started = time.perf_counter()
+        run_id = uuid.uuid4().hex[:8]
         effective = resolve_effective_economic_parameters(self._profile, overrides)
 
         probe_index = 0
@@ -319,7 +342,7 @@ class PricingCalculatorService:
             recommended_target_margin_pct=recommended_target_margin_pct,
             rounding_step=rounding_step,
         )
-        return PricingCalculationResponse(
+        response = PricingCalculationResponse(
             scenario=scenario,
             scenario_units=1,
             analyzed=analyzed,
@@ -333,6 +356,28 @@ class PricingCalculatorService:
             breakdowns=breakdowns,
             audit=audit,
         )
+        metrics_getter = getattr(self._provider, "performance_snapshot", None)
+        metrics = metrics_getter() if callable(metrics_getter) else {}
+        total_ms = round((time.perf_counter() - started) * 1000)
+        ml_shipping_ms = int(metrics.get("shipping_ms", 0))
+        ml_listing_prices_ms = int(metrics.get("listing_prices_ms", 0))
+        local_compute_ms = max(total_ms - ml_shipping_ms - ml_listing_prices_ms, 0)
+        performance_logger.info(
+            "pricing_completed run=%s total_ms=%d ml_shipping_ms=%d "
+            "ml_listing_prices_ms=%d local_compute_ms=%d cache_hits=%d "
+            "cache_misses=%d probes=%d shipping_requests=%d listing_prices_requests=%d",
+            run_id,
+            total_ms,
+            ml_shipping_ms,
+            ml_listing_prices_ms,
+            local_compute_ms,
+            int(metrics.get("cache_hits", 0)),
+            int(metrics.get("cache_misses", 0)),
+            probe_index,
+            int(metrics.get("shipping_requests", 0)),
+            int(metrics.get("listing_prices_requests", 0)),
+        )
+        return response
 
     def _evaluate(
         self,
