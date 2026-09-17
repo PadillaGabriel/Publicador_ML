@@ -20,6 +20,15 @@ class ImportMlaRequest(BaseModel):
         return item_id
 
 
+class ResolveMlaRequest(ImportMlaRequest):
+    category_id: str = Field(min_length=1, max_length=40)
+
+    @field_validator("category_id")
+    @classmethod
+    def normalize_category_id(cls, value: str) -> str:
+        return value.strip().upper()
+
+
 class TechnicalAttributeRecord(BaseModel):
     attribute_id: str
     label: str
@@ -30,13 +39,22 @@ class TechnicalAttributeRecord(BaseModel):
     status: str
 
 
-class ImportTechnicalAttributesResult(BaseModel):
+class MlaPublicationSnapshot(BaseModel):
     item_id: str
+    title: str
     category_id: str | None = None
-    imported_count: int
-    skipped_count: int
-    imported: list[TechnicalAttributeRecord] = Field(default_factory=list)
+    condition: str | None = None
+    seller_sku: str | None = None
+    attributes: list[TechnicalAttributeRecord] = Field(default_factory=list)
     skipped: list[TechnicalAttributeRecord] = Field(default_factory=list)
+
+
+class MlaReusePreviewResult(BaseModel):
+    item_id: str
+    category_id: str
+    reusable: list[TechnicalAttributeRecord] = Field(default_factory=list)
+    pending: list[TechnicalAttributeRecord] = Field(default_factory=list)
+    incompatible: list[TechnicalAttributeRecord] = Field(default_factory=list)
 
 
 class ReuseTechnicalAttributesResult(BaseModel):

@@ -8,17 +8,27 @@ export type TechnicalAttributeRecord = {
   status: string;
 };
 
-export type ImportTechnicalAttributesResult = {
+export type ReuseTechnicalAttributesResult = {
+  product_id: string;
+  category_id: string;
+  reusable: TechnicalAttributeRecord[];
+  pending: TechnicalAttributeRecord[];
+  incompatible: TechnicalAttributeRecord[];
+};
+
+
+export type MlaPublicationSnapshot = {
   item_id: string;
+  title: string;
   category_id?: string | null;
-  imported_count: number;
-  skipped_count: number;
-  imported: TechnicalAttributeRecord[];
+  condition?: string | null;
+  seller_sku?: string | null;
+  attributes: TechnicalAttributeRecord[];
   skipped: TechnicalAttributeRecord[];
 };
 
-export type ReuseTechnicalAttributesResult = {
-  product_id: string;
+export type MlaReusePreviewResult = {
+  item_id: string;
   category_id: string;
   reusable: TechnicalAttributeRecord[];
   pending: TechnicalAttributeRecord[];

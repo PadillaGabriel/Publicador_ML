@@ -481,3 +481,42 @@ table button{min-height:38px;padding:0 12px}
     min-width: 0;
   }
 }
+
+.publisherStartPanel {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid var(--border, #dfe3e8);
+  border-radius: 12px;
+  background: var(--surface-muted, #f8fafc);
+}
+.publisherStartHeader h3 { margin: 0 0 4px; }
+.publisherStartChoices {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin-top: 14px;
+}
+.publisherStartChoice {
+  min-height: 96px;
+  padding: 16px;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 6px;
+}
+.publisherStartChoice span { font-size: 13px; font-weight: 400; opacity: .78; }
+.publisherStartChoice.selected { outline: 2px solid currentColor; outline-offset: 1px; }
+.publisherMlaImport {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto;
+  align-items: end;
+  gap: 12px;
+  margin-top: 14px;
+}
+.publisherMlaImport .importSourceOk { grid-column: 1 / -1; }
+@media (max-width: 760px) {
+  .publisherStartChoices, .publisherMlaImport { grid-template-columns: 1fr; }
+  .publisherMlaImport .importSourceOk { grid-column: auto; }
+}

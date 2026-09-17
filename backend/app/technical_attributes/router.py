@@ -9,12 +9,15 @@ from app.core.db import get_db
 from app.persistence import MercadoLibreAccount, ProductMaster
 from app.technical_attributes.schemas import (
     ImportMlaRequest,
-    ImportTechnicalAttributesResult,
+    MlaPublicationSnapshot,
+    MlaReusePreviewResult,
+    ResolveMlaRequest,
     ReuseTechnicalAttributesResult,
 )
-from app.technical_attributes.service import import_from_mla, resolve_reuse
+from app.technical_attributes.service import preview_mla, resolve_preview_mla, resolve_reuse
 
 router = APIRouter(prefix="/api/products", tags=["technical-attributes"])
+publication_import_router = APIRouter(prefix="/api/publication-import", tags=["technical-attributes"])
 
 
 def _product(db: Session, product_id: uuid.UUID) -> ProductMaster:
@@ -31,18 +34,28 @@ def _account(db: Session, account_id: uuid.UUID) -> MercadoLibreAccount:
     return account
 
 
-@router.post(
-    "/{product_id}/technical-attributes/import-mla",
-    response_model=ImportTechnicalAttributesResult,
-)
-def import_mla_attributes(
-    product_id: uuid.UUID,
+
+@publication_import_router.post("/mla", response_model=MlaPublicationSnapshot)
+def preview_mla_publication(
     payload: ImportMlaRequest,
     db: Session = Depends(get_db),
 ):
-    product = _product(db, product_id)
     account = _account(db, payload.account_id)
-    return import_from_mla(db, product=product, account=account, item_id=payload.item_id)
+    return preview_mla(db, account=account, item_id=payload.item_id)
+
+
+@publication_import_router.post("/mla/reuse", response_model=MlaReusePreviewResult)
+def preview_mla_reuse(
+    payload: ResolveMlaRequest,
+    db: Session = Depends(get_db),
+):
+    account = _account(db, payload.account_id)
+    return resolve_preview_mla(
+        db,
+        account=account,
+        item_id=payload.item_id,
+        category_id=payload.category_id,
+    )
 
 
 @router.get(

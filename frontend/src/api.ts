@@ -1,4 +1,4 @@
-import type {ImportTechnicalAttributesResult, ReuseTechnicalAttributesResult} from "./technical-attributes/types";
+import type {MlaPublicationSnapshot, MlaReusePreviewResult, ReuseTechnicalAttributesResult} from "./technical-attributes/types";
 import type { ShippingCapabilities } from "./pricing/types";
 
 const configuredBase = (import.meta.env.VITE_API_URL || "").trim();
@@ -135,19 +135,27 @@ export function loadShippingCapabilities(
   );
 }
 
-export function importTechnicalAttributes(
-  productId: string,
+export function previewMlaPublication(
   accountId: string,
   itemId: string,
-): Promise<ImportTechnicalAttributesResult> {
-  return api<ImportTechnicalAttributesResult>(
-    `/api/products/${encodeURIComponent(productId)}/technical-attributes/import-mla`,
-    {
-      method: "POST",
-      body: JSON.stringify({account_id: accountId, item_id: itemId}),
-    },
-  );
+): Promise<MlaPublicationSnapshot> {
+  return api<MlaPublicationSnapshot>("/api/publication-import/mla", {
+    method: "POST",
+    body: JSON.stringify({account_id: accountId, item_id: itemId}),
+  });
 }
+
+export function resolveMlaPublicationReuse(
+  accountId: string,
+  itemId: string,
+  categoryId: string,
+): Promise<MlaReusePreviewResult> {
+  return api<MlaReusePreviewResult>("/api/publication-import/mla/reuse", {
+    method: "POST",
+    body: JSON.stringify({account_id: accountId, item_id: itemId, category_id: categoryId}),
+  });
+}
+
 
 export function loadReusableTechnicalAttributes(
   productId: string,

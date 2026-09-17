@@ -94,15 +94,15 @@ def test_upsert_updates_existing_attribute_without_duplicate():
     assert existing.source_reference == "MLA123"
 
 
-def test_import_from_mla_filters_non_reusable_and_records_source(monkeypatch):
+def test_preview_mla_filters_non_reusable_attributes(monkeypatch):
     db = MagicMock()
-    product = SimpleNamespace(id=uuid.uuid4())
     account = SimpleNamespace(id=uuid.uuid4(), site_id="MLA", seller_id="9988")
     item = {
         "id": "MLA123",
         "site_id": "MLA",
         "seller_id": 9988,
         "category_id": "MLA1000",
+        "title": "Producto",
         "attributes": [
             {"id": "BRAND", "name": "Marca", "value_name": "Marca X"},
             {"id": "SELLER_SKU", "name": "SKU", "value_name": "SKU-1"},
@@ -112,32 +112,20 @@ def test_import_from_mla_filters_non_reusable_and_records_source(monkeypatch):
     client = MagicMock()
     client.item.return_value = item
     monkeypatch.setattr(service, "MercadoLibreClient", lambda _token: client)
-    captured = {}
 
-    def fake_upsert(_db, **kwargs):
-        captured.update(kwargs)
-        return [SimpleNamespace(attribute_id="BRAND")]
+    result = service.preview_mla(db, account=account, item_id="mla123")
 
-    monkeypatch.setattr(service, "upsert_product_attributes", fake_upsert)
-    monkeypatch.setattr(service, "audit", lambda *args, **kwargs: None)
-
-    result = service.import_from_mla(db, product=product, account=account, item_id="mla123")
-
-    assert captured["attributes"] == {"BRAND": {"value_name": "Marca X"}}
-    assert captured["source_category_id"] == "MLA1000"
-    assert captured["source_kind"] == "MLA_IMPORT"
-    assert captured["source_reference"] == "MLA123"
-    assert result.imported_count == 1
-    assert result.skipped_count == 1
+    assert [row.attribute_id for row in result.attributes] == ["BRAND"]
+    assert [row.attribute_id for row in result.skipped] == ["SELLER_SKU"]
+    assert result.seller_sku == "SKU-1"
 
 
 @pytest.mark.parametrize(
     ("site_id", "seller_id"),
     [("MLB", "9988"), ("MLA", "7777")],
 )
-def test_import_rejects_wrong_site_or_seller(monkeypatch, site_id, seller_id):
+def test_preview_rejects_wrong_site_or_seller(monkeypatch, site_id, seller_id):
     db = MagicMock()
-    product = SimpleNamespace(id=uuid.uuid4())
     account = SimpleNamespace(id=uuid.uuid4(), site_id="MLA", seller_id="9988")
     monkeypatch.setattr(service, "load_access_token", lambda _db, _id: "token")
     client = MagicMock()
@@ -146,12 +134,13 @@ def test_import_rejects_wrong_site_or_seller(monkeypatch, site_id, seller_id):
         "site_id": site_id,
         "seller_id": seller_id,
         "category_id": "MLA1000",
+        "title": "Producto",
         "attributes": [],
     }
     monkeypatch.setattr(service, "MercadoLibreClient", lambda _token: client)
 
     with pytest.raises(HTTPException) as exc:
-        service.import_from_mla(db, product=product, account=account, item_id="MLA123")
+        service.preview_mla(db, account=account, item_id="MLA123")
     assert exc.value.status_code == 422
 
 
@@ -222,3 +211,84 @@ def test_resolve_reuse_rejects_non_publishable_category(monkeypatch):
     with pytest.raises(HTTPException) as exc:
         service.resolve_reuse(db, product=product, account=account, category_id="MLA9")
     assert exc.value.status_code == 422
+
+
+def test_preview_mla_does_not_require_product_and_returns_publication_context(monkeypatch):
+    db = MagicMock()
+    account = SimpleNamespace(id=uuid.uuid4(), site_id="MLA", seller_id="9988")
+    item = {
+        "id": "MLA123",
+        "site_id": "MLA",
+        "seller_id": 9988,
+        "title": "Organizador transparente",
+        "condition": "new",
+        "category_id": "MLA1000",
+        "seller_custom_field": "SKU-LEGACY",
+        "attributes": [
+            {"id": "SELLER_SKU", "name": "SKU", "value_name": "SKU-123"},
+            {"id": "BRAND", "name": "Marca", "value_name": "Silmar"},
+            {"id": "MATERIAL", "name": "Material", "value_name": "Poliestireno"},
+        ],
+    }
+    monkeypatch.setattr(service, "load_access_token", lambda _db, _id: "token")
+    client = MagicMock()
+    client.item.return_value = item
+    monkeypatch.setattr(service, "MercadoLibreClient", lambda _token: client)
+
+    result = service.preview_mla(db, account=account, item_id="mla123")
+
+    assert result.item_id == "MLA123"
+    assert result.title == "Organizador transparente"
+    assert result.category_id == "MLA1000"
+    assert result.condition == "new"
+    assert result.seller_sku == "SKU-123"
+    assert [row.attribute_id for row in result.attributes] == ["BRAND", "MATERIAL"]
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+
+
+def test_resolve_preview_mla_reuses_only_compatible_destination_fields(monkeypatch):
+    db = MagicMock()
+    account = SimpleNamespace(id=uuid.uuid4(), site_id="MLA", seller_id="9988")
+    preview = service.MlaPublicationSnapshot(
+        item_id="MLA123",
+        title="Producto",
+        category_id="MLA1",
+        attributes=[
+            service.TechnicalAttributeRecord(
+                attribute_id="BRAND",
+                label="Marca",
+                value={"value_name": "Silmar"},
+                source_category_id="MLA1",
+                source_kind="MLA_IMPORT",
+                source_reference="MLA123",
+                status="IMPORTADO",
+            ),
+            service.TechnicalAttributeRecord(
+                attribute_id="COLOR",
+                label="Color",
+                value={"value_id": "RED", "value_name": "Rojo"},
+                source_category_id="MLA1",
+                source_kind="MLA_IMPORT",
+                source_reference="MLA123",
+                status="IMPORTADO",
+            ),
+        ],
+    )
+    monkeypatch.setattr(service, "preview_mla", lambda *args, **kwargs: preview)
+    monkeypatch.setattr(
+        service,
+        "_category_fields",
+        lambda *args, **kwargs: (
+            "MLA2",
+            [
+                {"id": "BRAND", "label": "Marca", "value_type": "string", "allow_custom_value": True, "importance": "required"},
+                {"id": "COLOR", "label": "Color", "value_type": "list", "values": [{"id": "BLUE", "name": "Azul"}], "importance": "recommended"},
+            ],
+        ),
+    )
+
+    result = service.resolve_preview_mla(db, account=account, item_id="MLA123", category_id="MLA2")
+
+    assert [row.attribute_id for row in result.reusable] == ["BRAND"]
+    assert [row.attribute_id for row in result.incompatible] == ["COLOR"]

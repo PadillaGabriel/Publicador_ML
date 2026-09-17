@@ -1,12 +1,13 @@
 import React, {useEffect, useMemo, useRef, useState} from "react";
 import {createRoot} from "react-dom/client";
-import {api, downloadFile, importTechnicalAttributes, jobEvents, loadReusableTechnicalAttributes, loadShippingCapabilities} from "./api";
+import {api, downloadFile, jobEvents, loadReusableTechnicalAttributes, loadShippingCapabilities, previewMlaPublication, resolveMlaPublicationReuse} from "./api";
 import {PriceCalculator} from "./pricing/PriceCalculator";
 import {PricingProfileEditor} from "./pricing/PricingProfileEditor";
 import {normalizeQuantityPricing, type PricingCalculation, type PricingCalculatorPrefill, type PricingProfile, type QuantityPricingAnalysis, type QuantityPricingApiResponse, type ShippingCapabilities} from "./pricing/types";
 import {TitleAssistant} from "./title-intelligence/TitleAssistant";
 import {applyReusableAttributes} from "./technical-attributes/reuse";
-import type {ReuseTechnicalAttributesResult} from "./technical-attributes/types";
+import {buildImportedProductSeed} from "./technical-attributes/publication-import";
+import type {MlaPublicationSnapshot, ReuseTechnicalAttributesResult} from "./technical-attributes/types";
 import "./styles.css";
 
 type Account = {
@@ -218,7 +219,9 @@ function App() {
   const [manualAccount, setManualAccount] = useState({nickname: "", token: ""});
   const [existingProduct, setExistingProduct] = useState<ExistingProduct | null>(null);
   const [productMasterId, setProductMasterId] = useState("");
+  const [startMode, setStartMode] = useState<"" | "MLA_IMPORT" | "MANUAL">("");
   const [mlaImportId, setMlaImportId] = useState("");
+  const [mlaPreview, setMlaPreview] = useState<MlaPublicationSnapshot | null>(null);
   const [technicalReuse, setTechnicalReuse] = useState<ReuseTechnicalAttributesResult | null>(null);
   const [reusedAttributeIds, setReusedAttributeIds] = useState<Set<string>>(new Set());
   const [technicalAttributeBusy, setTechnicalAttributeBusy] = useState(false);
@@ -626,6 +629,40 @@ function App() {
 
   useEffect(() => {
     let cancelled = false;
+    if (!mlaPreview || !accountId || !categoryId || fields.length === 0) {
+      return () => { cancelled = true; };
+    }
+
+    resolveMlaPublicationReuse(accountId, mlaPreview.item_id, categoryId)
+      .then(result => {
+        if (cancelled) return;
+        setTechnicalReuse({
+          product_id: productMasterId || "",
+          category_id: result.category_id,
+          reusable: result.reusable,
+          pending: result.pending,
+          incompatible: result.incompatible,
+        });
+        const merged = applyReusableAttributes(attributesRef.current, result.reusable);
+        attributesRef.current = merged.attributes;
+        setAttributes(merged.attributes);
+        if (merged.appliedIds.length) {
+          setReusedAttributeIds(current => {
+            const next = new Set(current);
+            merged.appliedIds.forEach(id => next.add(id));
+            return next;
+          });
+        }
+      })
+      .catch(error => {
+        if (!cancelled) setMessage(error.message);
+      });
+
+    return () => { cancelled = true; };
+  }, [mlaPreview?.item_id, accountId, categoryId, fields.length]);
+
+  useEffect(() => {
+    let cancelled = false;
     if (!productMasterId || !accountId || !categoryId || fields.length === 0) {
       return () => { cancelled = true; };
     }
@@ -656,14 +693,16 @@ function App() {
     const sku = form.sku.trim();
     setExistingProduct(null);
     setProductMasterId("");
-    setTechnicalReuse(null);
-    setAttributes(current => {
-      if (reusedAttributeIds.size === 0) return current;
-      const next = {...current};
-      reusedAttributeIds.forEach(id => delete next[id]);
-      return next;
-    });
-    setReusedAttributeIds(new Set());
+    if (startMode !== "MLA_IMPORT") {
+      setTechnicalReuse(null);
+      setAttributes(current => {
+        if (reusedAttributeIds.size === 0) return current;
+        const next = {...current};
+        reusedAttributeIds.forEach(id => delete next[id]);
+        return next;
+      });
+      setReusedAttributeIds(new Set());
+    }
     if (!sku) {
       setDismissedExistingSku("");
       return;
@@ -1301,32 +1340,62 @@ function App() {
     });
   }
 
-  async function importMlaTechnicalSheet() {
+  async function importMlaPublication() {
     const itemId = mlaImportId.trim().toUpperCase();
-    if (!productMasterId) throw new Error("Guardá o recuperá primero un SKU para asociar la ficha técnica al producto.");
     if (!accountId) throw new Error("Seleccioná una cuenta de Mercado Libre.");
     if (!/^MLA\d+$/.test(itemId)) throw new Error("Ingresá un MLA válido, por ejemplo MLA123456789.");
 
     setTechnicalAttributeBusy(true);
     try {
-      const imported = await importTechnicalAttributes(productMasterId, accountId, itemId);
+      const imported = await previewMlaPublication(accountId, itemId);
+      const seed = buildImportedProductSeed(imported);
+      setMlaPreview(imported);
       setMlaImportId(imported.item_id);
-      if (categoryId && fields.length > 0) {
-        const reuse = await loadReusableTechnicalAttributes(productMasterId, accountId, categoryId);
-        setTechnicalReuse(reuse);
-        const merged = applyReusableAttributes(attributesRef.current, reuse.reusable);
-        attributesRef.current = merged.attributes;
-        setAttributes(merged.attributes);
-        setReusedAttributeIds(current => {
-          const next = new Set(current);
-          merged.appliedIds.forEach(id => next.add(id));
-          return next;
-        });
-      }
-      setMessage(`Ficha ${imported.item_id}: ${imported.imported_count} atributo(s) reutilizables importados y ${imported.skipped_count} omitidos.`);
+      setStartMode("MLA_IMPORT");
+      setForm(current => ({
+        ...current,
+        sku: seed.sku,
+        name: seed.name,
+        title: seed.title,
+        brand: seed.brand,
+        model: seed.model,
+      }));
+      setCategorySuggestions([]);
+      setSelectedCategoryName(seed.categoryId);
+      setCategoryId(seed.categoryId);
+      setMessage(
+        seed.categoryId
+          ? `Publicación ${imported.item_id} importada. Cargamos sus datos y estamos validando la ficha contra ${seed.categoryId}.`
+          : `Publicación ${imported.item_id} importada. Completá o buscá una categoría para continuar.`
+      );
     } finally {
       setTechnicalAttributeBusy(false);
     }
+  }
+
+  function startFromZero() {
+    setStartMode("MANUAL");
+    setMlaPreview(null);
+    setMlaImportId("");
+    setTechnicalReuse(null);
+    setReusedAttributeIds(new Set());
+    setProductMasterId("");
+    setExistingProduct(null);
+    setCategoryId("");
+    setSelectedCategoryName("");
+    setCategorySuggestions([]);
+    setAttributes({});
+    setForm(current => ({
+      ...current,
+      sku: "",
+      name: "",
+      title: "",
+      brand: "",
+      model: "",
+      characteristics: "",
+      description: "",
+    }));
+    setMessage("Carga manual iniciada. Completá los datos del producto y buscá su categoría.");
   }
 
   async function run<T>(fn: () => Promise<T>) {
@@ -1537,7 +1606,14 @@ function App() {
           <div className="sectionTitle"><span>1</span> Producto y categoría</div>
           <div className="grid2">
             <label>Cuenta
-              <select value={accountId} onChange={e=>setAccountId(e.target.value)}>
+              <select value={accountId} onChange={e=>{
+                setAccountId(e.target.value);
+                setStartMode("");
+                setMlaPreview(null);
+                setMlaImportId("");
+                setCategoryId("");
+                setSelectedCategoryName("");
+              }}>
                 <option value="">Seleccionar…</option>
                 {accounts.map(a=><option key={a.id} value={a.id}>{a.nickname} {a.seller_id ? `· ${a.seller_id}`:""}</option>)}
               </select>
@@ -1545,7 +1621,53 @@ function App() {
             </label>
           </div>
 
-          <div className="attributeHeader">
+          {accountId && <div className="publisherStartPanel">
+            <div className="publisherStartHeader">
+              <div>
+                <h3>¿Cómo querés comenzar?</h3>
+                <p className="helper blockHelper">Podés traer una publicación propia de Mercado Libre para reutilizar sus datos o cargar el producto completamente desde cero.</p>
+              </div>
+            </div>
+            <div className="publisherStartChoices">
+              <button
+                type="button"
+                className={`publisherStartChoice ${startMode === "MLA_IMPORT" ? "selected" : ""}`}
+                onClick={()=>setStartMode("MLA_IMPORT")}
+              >
+                <b>Importar publicación de Mercado Libre</b>
+                <span>Traer título, SKU, categoría y ficha técnica desde un MLA propio.</span>
+              </button>
+              <button
+                type="button"
+                className={`publisherStartChoice ${startMode === "MANUAL" ? "selected" : ""}`}
+                onClick={startFromZero}
+              >
+                <b>Crear producto desde cero</b>
+                <span>Completar SKU, producto, categoría y ficha manualmente.</span>
+              </button>
+            </div>
+            {startMode === "MLA_IMPORT" && <div className="publisherMlaImport">
+              <label>MLA de origen
+                <input
+                  value={mlaImportId}
+                  disabled={technicalAttributeBusy}
+                  onChange={e=>setMlaImportId(e.target.value.toUpperCase())}
+                  placeholder="MLA123456789"
+                  aria-label="MLA para importar publicación"
+                />
+              </label>
+              <button
+                type="button"
+                disabled={technicalAttributeBusy || !/^MLA\d+$/.test(mlaImportId.trim().toUpperCase())}
+                onClick={()=>run(importMlaPublication)}
+              >
+                {technicalAttributeBusy ? "Importando…" : "Importar y continuar"}
+              </button>
+              {mlaPreview && <small className="helper importSourceOk">Origen cargado: {mlaPreview.item_id}. Podés editar cualquier dato antes de guardar.</small>}
+            </div>}
+          </div>}
+
+          {startMode && <><div className="attributeHeader">
             <div>
               <h3>Información básica del producto</h3>
               <p className="helper blockHelper">Mercado Libre utiliza estos datos para sugerir la categoría final. No elegimos una categoría padre manualmente.</p>
@@ -1599,42 +1721,24 @@ function App() {
             attributes={currentProductAttributes()}
             maxLength={titleMaxLength}
             onUseTitle={(title) => setForm(current => ({...current, title}))}
-          />
+          /></>}
         </section>
 
         <section className={`card ${!contextComplete ? "locked" : ""}`}>
           <div className="sectionTitle"><span>2</span> Ficha técnica</div>
-          <div className="technicalReusePanel">
+          {(mlaPreview || technicalReuse) && <div className="technicalReusePanel">
             <div className="technicalReuseIntro">
               <div>
-                <h3>Reutilizar ficha técnica</h3>
-                <p className="helper blockHelper">Importá los atributos de un MLA propio. Sólo se completan campos vacíos cuyo ID y valor sean compatibles con la categoría actual; tus datos manuales nunca se pisan.</p>
-              </div>
-              <div className="technicalReuseImport">
-                <input
-                  value={mlaImportId}
-                  disabled={!productMasterId || technicalAttributeBusy}
-                  onChange={e=>setMlaImportId(e.target.value.toUpperCase())}
-                  placeholder="MLA123456789"
-                  aria-label="MLA para importar ficha técnica"
-                />
-                <button
-                  type="button"
-                  className="secondary"
-                  disabled={!productMasterId || !accountId || technicalAttributeBusy || !/^MLA\d+$/.test(mlaImportId.trim().toUpperCase())}
-                  onClick={()=>run(importMlaTechnicalSheet)}
-                >
-                  {technicalAttributeBusy ? "Importando…" : "Importar ficha desde MLA"}
-                </button>
+                <h3>{mlaPreview ? `Ficha importada desde ${mlaPreview.item_id}` : "Ficha técnica reutilizada"}</h3>
+                <p className="helper blockHelper">Sólo completamos campos vacíos compatibles con la categoría actual. Cualquier edición manual tiene prioridad.</p>
               </div>
             </div>
-            {!productMasterId && <small className="helper">Recuperá un SKU existente o guardá primero la ficha para habilitar la biblioteca técnica de ese producto.</small>}
             {technicalReuse && <div className="technicalReuseSummary">
               <span><b>{technicalReuse.reusable.length}</b> reutilizables</span>
               <span><b>{technicalReuse.pending.length}</b> pendientes</span>
               <span><b>{technicalReuse.incompatible.length}</b> no aplican</span>
             </div>}
-          </div>
+          </div>}
           {!contextComplete && <div className="lockedMessage">Ingresá el producto, buscá categorías y confirmá una categoría hoja para continuar.</div>}
           <div className="grid3">
             <label>Precio ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>{setForm({...form,price:e.target.value});setPricingAnalysis(null);}}/></label>
