@@ -1,6 +1,6 @@
 """add reusable product technical attributes
 
-Revision ID: 0009_product_technical_attributes
+Revision ID: 0009_technical_attributes
 Revises: 0008_pricing_economic_profile
 """
 
@@ -8,7 +8,7 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision = "0009_product_technical_attributes"
+revision = "0009_technical_attributes"
 down_revision = "0008_pricing_economic_profile"
 branch_labels = None
 depends_on = None
