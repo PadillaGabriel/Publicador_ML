@@ -1166,16 +1166,44 @@ function App() {
 
   async function uploadImages(files: FileList | null) {
     if (!files || !versionId) return;
+
+    const pending = Array.from(files);
+    const concurrency = 3;
     setImageUploadBusy(true);
+
     try {
       let uploaded = 0;
-      for (const file of Array.from(files)) {
-        const fd = new FormData();
-        fd.append("file", file);
-        await api(`/api/products/versions/${versionId}/images`, {method:"POST", body:fd});
-        uploaded += 1;
+      const failures: string[] = [];
+
+      for (let start = 0; start < pending.length; start += concurrency) {
+        const chunk = pending.slice(start, start + concurrency);
+        const results = await Promise.allSettled(
+          chunk.map(async (file) => {
+            const fd = new FormData();
+            fd.append("file", file);
+            await api(`/api/products/versions/${versionId}/images`, {method:"POST", body:fd});
+            return file.name;
+          })
+        );
+
+        results.forEach((result, index) => {
+          if (result.status === "fulfilled") {
+            uploaded += 1;
+            return;
+          }
+
+          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
+          failures.push(`${chunk[index].name}: ${reason}`);
+        });
       }
+
       const confirmed = await refreshUploadedImages(versionId);
+      if (failures.length) {
+        throw new Error(
+          `${uploaded} imagen(es) cargadas y ${failures.length} fallaron. ${failures.join(" · ")}`
+        );
+      }
+
       setMessage(`${uploaded} imagen(es) cargadas y ${confirmed.length} confirmadas por el backend.`);
     } finally {
       setImageUploadBusy(false);

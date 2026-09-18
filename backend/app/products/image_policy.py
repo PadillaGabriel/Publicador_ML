@@ -25,13 +25,15 @@ def inspect_image(content: bytes) -> ImageInspection:
     """Read image metadata without persisting or transforming the original file."""
     try:
         with Image.open(BytesIO(content)) as image:
+            width = int(image.width)
+            height = int(image.height)
+            image_format = str(image.format or "").upper()
             image.verify()
-        with Image.open(BytesIO(content)) as image:
-            return ImageInspection(
-                width=int(image.width),
-                height=int(image.height),
-                format=str(image.format or "").upper(),
-            )
+        return ImageInspection(
+            width=width,
+            height=height,
+            format=image_format,
+        )
     except (UnidentifiedImageError, OSError, ValueError) as exc:
         raise ImagePolicyError("El archivo no contiene una imagen válida.") from exc
 
