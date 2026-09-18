@@ -103,6 +103,10 @@ const TERMINAL_JOB_STATES = ["COMPLETED", "PARTIAL", "FAILED", "CANCELLED"];
 const GTIN_ATTRIBUTE_ID = "GTIN";
 const EMPTY_GTIN_REASON_ATTRIBUTE_ID = "EMPTY_GTIN_REASON";
 
+function activeJobStorageKey(accountId: string) {
+  return `ml-publisher-active-job:${accountId}`;
+}
+
 function attributeValuePresent(value: any) {
   if (value === undefined || value === null || value === "") return false;
   if (typeof value === "object") return Boolean(value.value_id || value.value_name || value.name);
@@ -430,17 +434,23 @@ function App() {
   }, []);
 
   useEffect(() => {
+    if (!accountId) return;
+    const storedJobId = window.localStorage.getItem(activeJobStorageKey(accountId));
+    if (!storedJobId) return;
+
     let source: EventSource | null = null;
-    api<{job:any | null}>("/api/jobs/active/current")
+    api<any>(`/api/jobs/${storedJobId}`)
       .then(result => {
-        if (!result.job) return;
-        const jobId = result.job.id;
-        setJob({...result.job, job_id:jobId});
-        source = watchJob(jobId);
+        if (TERMINAL_JOB_STATES.includes(result.status)) {
+          window.localStorage.removeItem(activeJobStorageKey(accountId));
+          return;
+        }
+        setJob({...result, job_id:storedJobId});
+        source = watchJob(storedJobId);
       })
-      .catch(() => undefined);
+      .catch(() => window.localStorage.removeItem(activeJobStorageKey(accountId)));
     return () => source?.close();
-  }, []);
+  }, [accountId]);
 
   useEffect(() => {
     setCategoryId("");
@@ -1168,32 +1178,25 @@ function App() {
     if (!files || !versionId) return;
 
     const pending = Array.from(files);
-    const concurrency = 3;
+    const batchSize = 6;
     setImageUploadBusy(true);
 
     try {
       let uploaded = 0;
       const failures: string[] = [];
 
-      for (let start = 0; start < pending.length; start += concurrency) {
-        const chunk = pending.slice(start, start + concurrency);
-        const results = await Promise.allSettled(
-          chunk.map(async (file) => {
-            const fd = new FormData();
-            fd.append("file", file);
-            await api(`/api/products/versions/${versionId}/images`, {method:"POST", body:fd});
-            return file.name;
-          })
+      for (let start = 0; start < pending.length; start += batchSize) {
+        const chunk = pending.slice(start, start + batchSize);
+        const fd = new FormData();
+        chunk.forEach(file => fd.append("files", file));
+
+        const result = await api<any>(
+          `/api/products/versions/${versionId}/images/batch`,
+          {method:"POST", body:fd}
         );
-
-        results.forEach((result, index) => {
-          if (result.status === "fulfilled") {
-            uploaded += 1;
-            return;
-          }
-
-          const reason = result.reason instanceof Error ? result.reason.message : String(result.reason);
-          failures.push(`${chunk[index].name}: ${reason}`);
+        uploaded += Number(result.uploaded_count || 0);
+        (result.failed || []).forEach((failure:any) => {
+          failures.push(`${failure.name || "Imagen"}: ${failure.detail || "No se pudo cargar."}`);
         });
       }
 
@@ -1283,10 +1286,10 @@ function App() {
   }
 
   async function approveReady() {
-    for (const d of drafts.filter(x => x.status === "READY")) {
-      await api(`/api/drafts/${d.id}/approve`, {method:"POST"});
-    }
-    await loadBatch();
+    if (!batchId) return;
+    const result = await api<any>(`/api/drafts/batches/${batchId}/approve-ready`, {method:"POST"});
+    await loadBatch(batchId);
+    setMessage(`${result.approved || 0} borrador(es) aprobados en una sola operación.`);
   }
 
   function watchJob(jobId: string) {
@@ -1298,6 +1301,7 @@ function App() {
       if (TERMINAL_JOB_STATES.includes(data.status)) {
         es.close();
         if (pollingTimer !== null) window.clearInterval(pollingTimer);
+        if (accountId) window.localStorage.removeItem(activeJobStorageKey(accountId));
         setSelectedDraftIds([]);
         loadBatch();
         return true;
@@ -1338,6 +1342,7 @@ function App() {
       body:JSON.stringify({batch_id: batchId, draft_ids: selectedApprovedDraftIds})
     });
     setJob(result);
+    if (accountId) window.localStorage.setItem(activeJobStorageKey(accountId), result.job_id);
     watchJob(result.job_id);
   }
 

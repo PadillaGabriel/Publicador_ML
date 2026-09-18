@@ -1,11 +1,14 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
 from sqlalchemy.orm import Session
 
 from app.accounts.service import load_access_token
 from app.catalog.service import get_category_metadata
 from app.core.config import get_settings
 from app.drafts.intelligence import jaccard, title_target_min_length
-from app.persistence import DraftBatch, ProductVersion, PublicationDraft
-from app.products.image_policy import ImagePolicyError, validate_stored_image
 from app.integrations.mercadolibre.attribute_contracts import (
     EMPTY_GTIN_REASON_ATTRIBUTE_ID,
     GTIN_ALTERNATIVE_ATTRIBUTE_IDS,
@@ -17,46 +20,40 @@ from app.integrations.mercadolibre.product_identifiers import (
     is_valid_identifier_format,
     value_matches_allowed_option,
 )
+from app.persistence import DraftBatch, ProductVersion, PublicationDraft
+from app.products.image_policy import ImagePolicyError, validate_stored_image
 from app.publication.commercial import listing_type_for_intent
 from app.publication.quantity_pricing import normalize_b2b_quantity_prices
 
 
-def validate_draft(db: Session, draft: PublicationDraft) -> tuple[list[dict], list[dict]]:
-    batch = db.get(DraftBatch, draft.batch_id)
+@dataclass(frozen=True, slots=True)
+class DraftValidationContext:
+    """Batch-scoped validation data shared by every draft in the same product snapshot."""
+
+    batch: DraftBatch
+    version: ProductVersion
+    metadata: Any
+    shared_errors: tuple[dict, ...]
+    shared_warnings: tuple[dict, ...]
+
+
+def build_validation_context(db: Session, batch: DraftBatch) -> DraftValidationContext:
+    """Load provider/category state once and validate product-level invariants once."""
+
     version = db.get(ProductVersion, batch.product_version_id)
+    if version is None:
+        raise RuntimeError("Product version not found during draft validation.")
+
     access_token = load_access_token(db, batch.account_id)
     metadata = get_category_metadata(
-        db, version.category_id, get_settings().ml_site_id, access_token=access_token
+        db,
+        version.category_id,
+        get_settings().ml_site_id,
+        access_token=access_token,
     )
 
     errors: list[dict] = []
     warnings: list[dict] = []
-    settings = metadata.raw_category.get("settings") or {}
-    max_title = settings.get("max_title_length")
-    if isinstance(max_title, int) and len(draft.title) > max_title:
-        errors.append({
-            "code": "TITLE_TOO_LONG",
-            "field": "title",
-            "message": f"Title exceeds category max length ({max_title}).",
-        })
-    elif len(draft.title) > 60 and max_title is None:
-        warnings.append({
-            "code": "TITLE_LENGTH_UNCONFIRMED",
-            "field": "title",
-            "message": "Category did not expose max_title_length; confirm current ML contract.",
-        })
-
-    effective_max = max_title if isinstance(max_title, int) and max_title > 0 else 60
-    target_min = title_target_min_length(effective_max)
-    if len(draft.title) < target_min:
-        warnings.append({
-            "code": "TITLE_CAPACITY_UNDERUSED",
-            "field": "title",
-            "message": (
-                f"El título usa {len(draft.title)}/{effective_max} caracteres. "
-                f"Si existe información factual útil, conviene acercarse al rango {target_min}-{effective_max}."
-            ),
-        })
 
     if float(version.price) <= 0:
         errors.append({"code": "INVALID_PRICE", "field": "price", "message": "Price must be > 0."})
@@ -129,9 +126,10 @@ def validate_draft(db: Session, draft: PublicationDraft) -> tuple[list[dict], li
                 "field": f"attributes.{attr_id}",
                 "message": (
                     f"La unidad '{unit}' no es válida para {field.get('label') or attr_id}. "
-                    f"Usá una unidad informada por Mercado Libre."
+                    "Usá una unidad informada por Mercado Libre."
                 ),
             })
+
     has_gtin_alternative_contract = GTIN_ALTERNATIVE_ATTRIBUTE_IDS.issubset(fields_by_id)
     if has_gtin_alternative_contract:
         gtin_present = attribute_has_value(attributes.get(GTIN_ATTRIBUTE_ID))
@@ -180,6 +178,76 @@ def validate_draft(db: Session, draft: PublicationDraft) -> tuple[list[dict], li
                 "message": "La garantía del vendedor requiere duración positiva y unidad válida.",
             })
 
+    try:
+        normalize_b2b_quantity_prices(version.commercial, base_price=version.price)
+    except ValueError as exc:
+        errors.append({
+            "code": "INVALID_QUANTITY_PRICING",
+            "field": "commercial.quantity_prices",
+            "message": str(exc),
+        })
+
+    required_ids = {
+        field["id"]
+        for field in metadata.normalized_schema.get("fields", [])
+        if (field.get("required") or field.get("catalog_required")) and field.get("id")
+    }
+    if has_gtin_alternative_contract:
+        required_ids -= GTIN_ALTERNATIVE_ATTRIBUTE_IDS
+    for attr_id in required_ids:
+        if not attribute_has_value(attributes.get(attr_id)):
+            errors.append({
+                "code": "REQUIRED_ATTRIBUTE_MISSING",
+                "field": f"attributes.{attr_id}",
+                "message": f"Required category attribute {attr_id} is missing.",
+            })
+
+    return DraftValidationContext(
+        batch=batch,
+        version=version,
+        metadata=metadata,
+        shared_errors=tuple(errors),
+        shared_warnings=tuple(warnings),
+    )
+
+
+def validate_draft_with_context(
+    draft: PublicationDraft,
+    context: DraftValidationContext,
+) -> tuple[list[dict], list[dict]]:
+    """Validate one draft using immutable batch-scoped context."""
+
+    errors = [dict(item) for item in context.shared_errors]
+    warnings = [dict(item) for item in context.shared_warnings]
+    metadata = context.metadata
+
+    category_settings = metadata.raw_category.get("settings") or {}
+    max_title = category_settings.get("max_title_length")
+    if isinstance(max_title, int) and len(draft.title) > max_title:
+        errors.append({
+            "code": "TITLE_TOO_LONG",
+            "field": "title",
+            "message": f"Title exceeds category max length ({max_title}).",
+        })
+    elif len(draft.title) > 60 and max_title is None:
+        warnings.append({
+            "code": "TITLE_LENGTH_UNCONFIRMED",
+            "field": "title",
+            "message": "Category did not expose max_title_length; confirm current ML contract.",
+        })
+
+    effective_max = max_title if isinstance(max_title, int) and max_title > 0 else 60
+    target_min = title_target_min_length(effective_max)
+    if len(draft.title) < target_min:
+        warnings.append({
+            "code": "TITLE_CAPACITY_UNDERUSED",
+            "field": "title",
+            "message": (
+                f"El título usa {len(draft.title)}/{effective_max} caracteres. "
+                f"Si existe información factual útil, conviene acercarse al rango {target_min}-{effective_max}."
+            ),
+        })
+
     commercial = draft.commercial_config or {}
     commercial_intent = str(commercial.get("commercial_intent") or "").strip()
     resolved_listing_type = str(commercial.get("listing_type_id") or "").strip()
@@ -214,16 +282,6 @@ def validate_draft(db: Session, draft: PublicationDraft) -> tuple[list[dict], li
             "message": "La modalidad de cuotas todavía no fue resuelta contra el contrato vigente de Mercado Libre.",
         })
 
-
-    try:
-        normalize_b2b_quantity_prices(version.commercial, base_price=version.price)
-    except ValueError as exc:
-        errors.append({
-            "code": "INVALID_QUANTITY_PRICING",
-            "field": "commercial.quantity_prices",
-            "message": str(exc),
-        })
-
     if not " ".join((draft.title or "").split()).strip():
         errors.append({
             "code": "PUBLICATION_NAME_NOT_RESOLVED",
@@ -231,22 +289,9 @@ def validate_draft(db: Session, draft: PublicationDraft) -> tuple[list[dict], li
             "message": "El borrador necesita un título/intención de nombre antes de publicar.",
         })
 
-    required_ids = {
-        f["id"] for f in metadata.normalized_schema.get("fields", [])
-        if (f.get("required") or f.get("catalog_required")) and f.get("id")
-    }
-    if has_gtin_alternative_contract:
-        required_ids -= GTIN_ALTERNATIVE_ATTRIBUTE_IDS
-    missing = [attr_id for attr_id in required_ids if not attribute_has_value(attributes.get(attr_id))]
-    for attr_id in missing:
-        errors.append({
-            "code": "REQUIRED_ATTRIBUTE_MISSING",
-            "field": f"attributes.{attr_id}",
-            "message": f"Required category attribute {attr_id} is missing.",
-        })
-
     sibling_titles = [
-        item.title for item in batch.drafts
+        item.title
+        for item in context.batch.drafts
         if item.id != draft.id and item.status != "EXCLUDED"
     ]
     if any(jaccard(draft.title, sibling) > 0.90 for sibling in sibling_titles):
@@ -255,4 +300,14 @@ def validate_draft(db: Session, draft: PublicationDraft) -> tuple[list[dict], li
             "field": "title",
             "message": "Title is too similar to another draft in the same batch.",
         })
+
     return errors, warnings
+
+
+def validate_draft(db: Session, draft: PublicationDraft) -> tuple[list[dict], list[dict]]:
+    """Compatibility wrapper for single-draft validation."""
+
+    batch = db.get(DraftBatch, draft.batch_id)
+    if batch is None:
+        raise RuntimeError("Draft batch not found during draft validation.")
+    return validate_draft_with_context(draft, build_validation_context(db, batch))

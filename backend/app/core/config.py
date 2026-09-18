@@ -25,6 +25,9 @@ class Settings(BaseSettings):
     app_public_base_url: str = ""
 
     database_url: str
+    database_pool_size: int = 8
+    database_max_overflow: int = 8
+    database_pool_timeout_seconds: float = 15.0
 
     cors_origins: str = "http://localhost:5173"
 
@@ -38,6 +41,7 @@ class Settings(BaseSettings):
     ml_keyword_trends_ttl_seconds: int = 86400
     ml_request_timeout_seconds: float = 20.0
     ml_live_publication_enabled: bool = False
+    ml_preflight_concurrency: int = 6
 
     keyword_local_embeddings_enabled: bool = False
     keyword_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
@@ -53,15 +57,20 @@ class Settings(BaseSettings):
     upload_dir: Path = Path("./uploads")
     frontend_dist_dir: Path = PROJECT_ROOT / "frontend" / "dist"
     max_upload_bytes: int = 10 * 1024 * 1024
+    max_upload_batch_files: int = 6
+    max_upload_batch_bytes: int = 60 * 1024 * 1024
     cleanup_uploads_after_success: bool = False
     ml_image_min_side_px: int = 500
     ml_image_recommended_side_px: int = 1200
     ml_image_allowed_formats_csv: str = "JPEG,JPG,PNG"
 
     worker_poll_seconds: float = 2.0
+    worker_processes: int = 2
     worker_max_attempts: int = 4
     worker_base_backoff_seconds: float = 2.0
     worker_heartbeat_stale_seconds: float = 30.0
+    worker_image_upload_concurrency: int = 3
+    job_event_poll_seconds: float = 1.5
 
 
 

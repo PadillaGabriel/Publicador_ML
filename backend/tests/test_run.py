@@ -28,7 +28,7 @@ class _ProcessStub:
 def test_supervisor_starts_uvicorn_without_reload(monkeypatch):
     monkeypatch.setenv("PORT", "10000")
     calls: list[tuple[str, tuple[str, ...]]] = []
-    processes = [_ProcessStub(pid=101), _ProcessStub(pid=202)]
+    processes = [_ProcessStub(pid=101), _ProcessStub(pid=202), _ProcessStub(pid=303)]
 
     def fake_start(module: str, *args: str) -> _ProcessStub:
         calls.append((module, args))
@@ -47,5 +47,7 @@ def test_supervisor_starts_uvicorn_without_reload(monkeypatch):
         ("app.main:app", "--host", "0.0.0.0", "--port", "10000"),
     )
     assert calls[1] == ("app.worker", ())
+    assert calls[2] == ("app.worker", ())
     assert processes[0].terminated is True
     assert processes[1].terminated is True
+    assert processes[2].terminated is True

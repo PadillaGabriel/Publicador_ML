@@ -2,20 +2,22 @@ import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.audit.service import audit
 from app.core.db import get_db
 from app.core.enums import DraftStatus
 from app.drafts.service import generate_drafts, rebase_batch_product_version
+from app.drafts.validation_service import (
+    approve_ready_drafts,
+    validate_batch_drafts,
+    validate_single_draft,
+)
 from app.integrations.mercadolibre.client import MercadoLibreError
 from app.persistence import (
     DraftBatch, KeywordSnapshot, ProductVersion, PublicationDraft, TitleGenerationRun, ValidationResult
 )
-from app.publication.payload import ordered_image_urls
-from app.publication.preflight import validate_draft_with_mercadolibre
-from app.publication.validation import validate_draft
 
 router = APIRouter(prefix="/api/drafts", tags=["drafts"])
 
@@ -160,47 +162,6 @@ def update_title(draft_id: uuid.UUID, payload: TitleUpdate, db: Session = Depend
 
 
 
-def _validate_and_store(
-    db: Session,
-    draft: PublicationDraft,
-    request: Request,
-) -> tuple[list[dict], list[dict]]:
-    errors, warnings = validate_draft(db, draft)
-    if not errors:
-        batch = db.get(DraftBatch, draft.batch_id)
-        version = db.get(ProductVersion, batch.product_version_id) if batch else None
-        if version is None:
-            errors.append({
-                "code": "PRODUCT_VERSION_NOT_FOUND",
-                "field": None,
-                "message": "No se encontró la versión de producto asociada al borrador.",
-            })
-        else:
-            image_urls = ordered_image_urls(
-                version,
-                draft,
-                lambda image_id: str(request.url_for("serve_upload", image_id=image_id)),
-            )
-            try:
-                errors.extend(validate_draft_with_mercadolibre(db, draft, image_urls))
-            except MercadoLibreError as exc:
-                raise HTTPException(
-                    status_code=502,
-                    detail="Mercado Libre no pudo ejecutar la validación previa. Volvé a intentar.",
-                ) from exc
-
-    db.execute(delete(ValidationResult).where(ValidationResult.draft_id == draft.id))
-    db.add(
-        ValidationResult(
-            draft_id=draft.id,
-            valid=not errors,
-            errors=errors,
-            warnings=warnings,
-        )
-    )
-    draft.status = DraftStatus.READY if not errors else DraftStatus.INVALID
-    return errors, warnings
-
 
 @router.post("/batches/{batch_id}/product-correction")
 def correct_batch_product(
@@ -240,26 +201,29 @@ def validate_batch(batch_id: uuid.UUID, request: Request, db: Session = Depends(
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found.")
 
-    results = []
-    for draft in sorted(batch.drafts, key=lambda item: item.sequence_number):
-        if draft.status in {
-            DraftStatus.PUBLISHING,
-            DraftStatus.PUBLISHED,
-            DraftStatus.EXCLUDED,
-            DraftStatus.CANCELLED,
-            DraftStatus.UNKNOWN_EXTERNAL_STATE,
-        }:
-            continue
-        errors, warnings = _validate_and_store(db, draft, request)
-        results.append({
-            "draft_id": draft.id,
-            "status": draft.status,
-            "valid": not errors,
-            "errors": errors,
-            "warnings": warnings,
-        })
+    try:
+        outcomes = validate_batch_drafts(
+            db,
+            batch=batch,
+            image_url_for=lambda image_id: str(request.url_for("serve_upload", image_id=image_id)),
+        )
+    except MercadoLibreError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Mercado Libre no pudo ejecutar la validación previa. Volvé a intentar.",
+        ) from exc
 
     db.commit()
+    results = [
+        {
+            "draft_id": outcome.draft.id,
+            "status": outcome.draft.status,
+            "valid": outcome.valid,
+            "errors": outcome.errors,
+            "warnings": outcome.warnings,
+        }
+        for outcome in outcomes
+    ]
     return {
         "batch_id": batch.id,
         "validated": len(results),
@@ -274,9 +238,38 @@ def validate(draft_id: uuid.UUID, request: Request, db: Session = Depends(get_db
     draft = db.get(PublicationDraft, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found.")
-    errors, warnings = _validate_and_store(db, draft, request)
+    try:
+        outcome = validate_single_draft(
+            db,
+            draft=draft,
+            image_url_for=lambda image_id: str(request.url_for("serve_upload", image_id=image_id)),
+        )
+    except MercadoLibreError as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="Mercado Libre no pudo ejecutar la validación previa. Volvé a intentar.",
+        ) from exc
     db.commit()
-    return {"valid": not errors, "errors": errors, "warnings": warnings, "status": draft.status}
+    return {
+        "valid": outcome.valid,
+        "errors": outcome.errors,
+        "warnings": outcome.warnings,
+        "status": outcome.draft.status,
+    }
+
+
+@router.post("/batches/{batch_id}/approve-ready")
+def approve_batch_ready(batch_id: uuid.UUID, db: Session = Depends(get_db)):
+    batch = db.get(DraftBatch, batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found.")
+    approved = approve_ready_drafts(db, batch_id=batch_id)
+    db.commit()
+    return {
+        "batch_id": batch_id,
+        "approved": len(approved),
+        "draft_ids": [draft.id for draft in approved],
+    }
 
 
 @router.post("/{draft_id}/approve")

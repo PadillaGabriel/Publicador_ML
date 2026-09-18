@@ -137,6 +137,12 @@ def _job_warnings(db, job: Job) -> list[dict]:
 
 def job_dict(db, job: Job) -> dict:
     pct = int((job.processed / job.total) * 100) if job.total else 100
+    terminal = job.status in {
+        JobStatus.COMPLETED,
+        JobStatus.PARTIAL,
+        JobStatus.FAILED,
+        JobStatus.CANCELLED,
+    }
     worker = publication_worker_status(
         db,
         stale_after_seconds=settings.worker_heartbeat_stale_seconds,
@@ -151,8 +157,10 @@ def job_dict(db, job: Job) -> dict:
         "progress": pct,
         "started_at": job.started_at.isoformat() if job.started_at else None,
         "finished_at": job.finished_at.isoformat() if job.finished_at else None,
-        "failures": _job_failures(db, job),
-        "warnings": _job_warnings(db, job),
+        # Full failure/warning detail is only useful once the job stops changing.
+        # Avoid two joined queries per SSE tick for every connected operator.
+        "failures": _job_failures(db, job) if terminal else [],
+        "warnings": _job_warnings(db, job) if terminal else [],
         "worker": worker,
         **_current_execution(db, job, worker),
     }
@@ -225,6 +233,6 @@ async def job_events(job_id: uuid.UUID):
                 last = raw
             if current["status"] in {"COMPLETED", "PARTIAL", "FAILED", "CANCELLED"}:
                 return
-            await asyncio.sleep(1)
+            await asyncio.sleep(max(0.5, settings.job_event_poll_seconds))
 
     return StreamingResponse(stream(), media_type="text/event-stream")

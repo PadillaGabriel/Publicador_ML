@@ -1,6 +1,7 @@
 import logging
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from sqlalchemy import select
@@ -62,6 +63,49 @@ def _existing_confirmed_publication(db, draft_id):
     return None
 
 
+def _picture_ids_for_images(
+    client: MercadoLibreClient,
+    ordered_images: list,
+    picture_cache: dict[str, str],
+) -> list[str]:
+    """Upload each product image at most once per job and preserve per-draft order."""
+
+    started = time.perf_counter()
+    missing = {
+        str(image.id): image
+        for image in ordered_images
+        if str(image.id) not in picture_cache
+    }
+    if missing:
+        max_workers = max(1, min(settings.worker_image_upload_concurrency, len(missing)))
+        first_error: MercadoLibreError | None = None
+        with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ml-picture") as executor:
+            futures = {
+                executor.submit(
+                    client.upload_item_picture,
+                    image.storage_path,
+                    image.mime_type,
+                ): image_id
+                for image_id, image in missing.items()
+            }
+            for future in as_completed(futures):
+                image_id = futures[future]
+                try:
+                    picture_cache[image_id] = str(future.result()["id"])
+                except MercadoLibreError as exc:
+                    if first_error is None:
+                        first_error = exc
+        if first_error is not None:
+            raise first_error
+
+    logger.info(
+        "publication_pictures_ready total=%d uploaded=%d reused=%d duration_ms=%d",
+        len(ordered_images),
+        len(missing),
+        len(ordered_images) - len(missing),
+        round((time.perf_counter() - started) * 1000),
+    )
+    return [picture_cache[str(image.id)] for image in ordered_images]
 
 
 def _description_sync_status(publication: Publication) -> str:
@@ -204,7 +248,10 @@ def _fail_without_retry(db, *, item, draft, attempt, outcome: str, code: str, me
     return False, False
 
 
-def process_item_once(item_id: uuid.UUID) -> tuple[bool, bool]:
+def process_item_once(
+    item_id: uuid.UUID,
+    picture_cache: dict[str, str],
+) -> tuple[bool, bool]:
     """Return (success, should_retry).
 
     Network timeout after sending a publication is intentionally NOT retried:
@@ -321,10 +368,11 @@ def process_item_once(item_id: uuid.UUID) -> tuple[bool, bool]:
         db.commit()
 
         try:
-            uploaded_picture_ids = [
-                str(client.upload_item_picture(image.storage_path, image.mime_type)["id"])
-                for image in ordered_images
-            ]
+            uploaded_picture_ids = _picture_ids_for_images(
+                client,
+                ordered_images,
+                picture_cache,
+            )
             payload = build_item_payload(
                 version,
                 draft,
@@ -448,9 +496,9 @@ def process_item_once(item_id: uuid.UUID) -> tuple[bool, bool]:
             return False, retry
 
 
-def process_item(item_id: uuid.UUID) -> bool:
+def process_item(item_id: uuid.UUID, picture_cache: dict[str, str]) -> bool:
     while True:
-        success, retry = process_item_once(item_id)
+        success, retry = process_item_once(item_id, picture_cache)
         if success:
             return True
         if not retry:
@@ -471,10 +519,11 @@ def process_job(job_id: uuid.UUID, *, worker_instance_id: uuid.UUID):
             .order_by(JobItem.id)
         ).all()
 
+    picture_cache: dict[str, str] = {}
     for item_id in item_ids:
         with SessionLocal() as db:
             heartbeat_worker(db, instance_id=worker_instance_id)
-        ok = process_item(item_id)
+        ok = process_item(item_id, picture_cache)
         with SessionLocal() as db:
             heartbeat_worker(db, instance_id=worker_instance_id)
             job = db.get(Job, job_id)
