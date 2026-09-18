@@ -181,6 +181,7 @@ def test_quantity_tiers_endpoint_uses_pricing_service_without_publication_side_e
                     QuantityTierAnalysis(
                         min_purchase_unit=tier.min_purchase_unit,
                         amount=base.minimum.gross_price,
+                        target_margin_pct=base.minimum.target_margin_pct,
                         analyzed=base.analyzed,
                         status="OPTIMO",
                         minimum_price=base.minimum.gross_price,

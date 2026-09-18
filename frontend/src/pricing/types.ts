@@ -43,6 +43,7 @@ export type PricingBreakdown = {
   netCmv: number;
   mlCommissionNet: number;
   financingNet: number;
+  fixedFee: number;
   mlFixedFeeNet: number;
   shippingCost: number;
   shippingSubsidy: number;
@@ -91,6 +92,7 @@ export type PricingCalculation = {
 export type QuantityTierAnalysis = {
   minPurchaseUnit: number;
   amount: number;
+  targetMarginPct: number;
   contributionMargin: number;
   contributionMarginPct: number;
   status: "OPTIMO" | "SIN_VENTAJA";
@@ -130,7 +132,7 @@ export type ShippingCapabilities = {
 
 type ApiEconomicResult = {
   gross_price: number; net_price: number; gross_cmv: number; net_cmv: number;
-  ml_commission_net: number; financing_net: number; ml_fixed_fee_net: number; shipping_cost: number;
+  ml_commission_net: number; financing_net: number; fixed_fee: number; ml_fixed_fee_net: number; shipping_cost: number;
   shipping_subsidy: number; buyer_shipping_amount: number; net_logistic_cost: number;
   iibb: number; ads_expected: number; refunds_expected: number; additional_unit_cost_net: number;
   contribution_margin: number; contribution_margin_pct: number;
@@ -160,7 +162,7 @@ function numberValue(value: number): number { return Number(value); }
 function toBreakdown(source: ApiEconomicResult): PricingBreakdown {
   return {
     grossPrice: numberValue(source.gross_price), netPrice: numberValue(source.net_price), grossCmv: numberValue(source.gross_cmv), netCmv: numberValue(source.net_cmv),
-    mlCommissionNet: numberValue(source.ml_commission_net), financingNet: numberValue(source.financing_net), mlFixedFeeNet: numberValue(source.ml_fixed_fee_net),
+    mlCommissionNet: numberValue(source.ml_commission_net), financingNet: numberValue(source.financing_net), fixedFee: numberValue(source.fixed_fee), mlFixedFeeNet: numberValue(source.ml_fixed_fee_net),
     shippingCost: numberValue(source.shipping_cost), shippingSubsidy: numberValue(source.shipping_subsidy), buyerShippingAmount: numberValue(source.buyer_shipping_amount),
     netLogisticCost: numberValue(source.net_logistic_cost), iibb: numberValue(source.iibb), adsExpected: numberValue(source.ads_expected),
     refundsExpected: numberValue(source.refunds_expected), additionalUnitCostNet: numberValue(source.additional_unit_cost_net),
@@ -180,6 +182,7 @@ export type QuantityPricingApiResponse = {
   tiers: Array<{
     min_purchase_unit: number;
     amount: number;
+    target_margin_pct: number;
     analyzed: ApiEconomicResult;
     status: "OPTIMO" | "SIN_VENTAJA";
     minimum_price: number;
@@ -196,6 +199,7 @@ export function normalizeQuantityPricing(response: QuantityPricingApiResponse): 
     tiers: response.tiers.map(tier => ({
       minPurchaseUnit: tier.min_purchase_unit,
       amount: numberValue(tier.amount),
+      targetMarginPct: numberValue(tier.target_margin_pct),
       contributionMargin: numberValue(tier.analyzed.contribution_margin),
       contributionMarginPct: numberValue(tier.analyzed.contribution_margin_pct),
       status: tier.status,

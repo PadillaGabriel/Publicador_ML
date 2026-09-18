@@ -97,6 +97,13 @@ class QuantityTierInput(BaseModel):
 class QuantityPricingSimulationRequest(PricingSimulationRequest):
     tiers: list[QuantityTierInput] = Field(min_length=1, max_length=5)
 
+    @model_validator(mode="after")
+    def validate_tiers(self):
+        quantities = [tier.min_purchase_unit for tier in self.tiers]
+        if len(quantities) != len(set(quantities)):
+            raise ValueError("Las cantidades mínimas mayoristas no pueden repetirse.")
+        return self
+
 
 class NewProductPricingRequest(BaseModel):
     sku: str | None = Field(default=None, max_length=120)
@@ -181,6 +188,7 @@ class QuantityTierAnalysisResponse(BaseModel):
 
     min_purchase_unit: int
     amount: Decimal
+    target_margin_pct: Decimal
     analyzed: EconomicResultResponse
     status: Literal["OPTIMO", "SIN_VENTAJA"]
     minimum_price: Decimal

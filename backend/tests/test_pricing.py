@@ -80,3 +80,33 @@ def test_b2b_payload_preserves_non_b2b_prices_and_replaces_old_b2b_nodes():
     assert payload["prices"][-1]["conditions"]["context_restrictions"] == [
         "channel_marketplace", "user_type_business"
     ]
+
+
+def test_pricing_separates_base_commission_financing_and_fixed_fee():
+    result = evaluate_economics(
+        EconomicInputs(
+            gross_price=Decimal("1210"),
+            gross_cmv=Decimal("0"),
+            vat_rate=Decimal("0.21"),
+            iibb_rate=Decimal("0"),
+            ads_rate=Decimal("0"),
+            refund_rate=Decimal("0"),
+            additional_unit_cost=Decimal("0"),
+        ),
+        MarketplaceEconomics(
+            percentage_fee=Decimal("36"),
+            meli_percentage_fee=Decimal("13"),
+            financing_add_on_fee=Decimal("23"),
+            fixed_fee=Decimal("242"),
+            shipping_cost=Decimal("0"),
+            shipping_subsidy=Decimal("0"),
+            buyer_shipping_amount=Decimal("0"),
+        ),
+    )
+
+    assert result.net_price == Decimal("1000.00")
+    assert result.ml_commission_net == Decimal("130.00")
+    assert result.financing_net == Decimal("230.00")
+    assert result.fixed_fee == Decimal("242.00")
+    assert result.ml_fixed_fee_net == Decimal("200.00")
+    assert result.contribution_margin == Decimal("440.00")

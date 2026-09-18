@@ -22,7 +22,7 @@ from app.pricing.domain import (
     evaluate_economics,
 )
 from app.pricing.domain.models import MarketplaceEconomics
-from app.pricing.quantity_pricing import quote_optimal_quantity_price
+from app.pricing.quantity_pricing import quantity_discount_pct
 from app.pricing.infrastructure.mercadolibre import (
     ExistingListingContext,
     MarketplaceSimulationContext,
@@ -63,6 +63,7 @@ class PricingAudit:
 class QuantityTierAnalysis:
     min_purchase_unit: int
     amount: Decimal
+    target_margin_pct: Decimal
     analyzed: EconomicResult
     status: Literal["OPTIMO", "SIN_VENTAJA"]
     minimum_price: Decimal
@@ -125,7 +126,7 @@ class PricingCalculatorService:
         request: NewProductPricingRequest,
         tiers: list[QuantityTierInput],
     ) -> QuantityPricingResponse:
-        """Evaluate B2B unit prices with the same economic engine used by the calculator."""
+        """Build progressive B2B prices from the configured target margin down to its floor."""
         context = self._new_product_context(request)
         effective = resolve_effective_economic_parameters(
             self._profile, request.overrides.model_dump()
@@ -156,48 +157,59 @@ class PricingCalculatorService:
             if request.target_margin_pct is not None
             else self._profile.target_margin_pct
         )
-        solved_targets: dict[Decimal, PriceTargetResult] = {}
-
-        def solve_target(margin: Decimal) -> PriceTargetResult:
-            cached = solved_targets.get(margin)
-            if cached is not None:
-                return cached
-            solved = self._optimizer.solve(
-                evaluate, margin, seed_price, tolerance_price=rounding_step
-            )
-            solved_targets[margin] = solved
-            return solved
-
-        minimum = solve_target(self._profile.minimum_margin_pct)
-        target = solve_target(target_margin)
+        minimum_margin = self._profile.minimum_margin_pct
+        ordered_tiers = sorted(tiers, key=lambda tier: tier.min_purchase_unit)
+        tier_margins = [
+            max(minimum_margin, target_margin - Decimal(5 * (index + 1)))
+            for index in range(len(ordered_tiers))
+        ]
+        solved_targets = self._optimizer.solve_many(
+            evaluate,
+            tuple({minimum_margin, target_margin, *tier_margins}),
+            seed_price,
+            tolerance_price=rounding_step,
+        )
+        minimum = solved_targets[minimum_margin]
+        target = solved_targets[target_margin]
         retail_price = request.sale_price or max(target.gross_price, minimum.gross_price)
-        quote = quote_optimal_quantity_price(
-            retail_price=retail_price,
-            minimum_sustainable_price=minimum.gross_price,
-        )
-        optimal_economics = evaluate(quote.amount)
-        if optimal_economics.contribution_margin_pct < self._profile.minimum_margin_pct:
-            raise PricingDomainError(
-                "OBJETIVO_NO_CONVERGE",
-                "The optimized wholesale price does not satisfy the configured minimum margin.",
+        previous_amount = retail_price
+        analyzed_tiers: list[QuantityTierAnalysis] = []
+
+        for tier, margin in zip(ordered_tiers, tier_margins, strict=True):
+            solved = solved_targets[margin]
+            amount = solved.gross_price
+            economics = evaluate(amount)
+            if economics.contribution_margin_pct < minimum_margin:
+                raise PricingDomainError(
+                    "OBJETIVO_NO_CONVERGE",
+                    "The optimized wholesale price does not satisfy the configured minimum margin.",
+                )
+            status: Literal["OPTIMO", "SIN_VENTAJA"] = (
+                "OPTIMO" if amount < previous_amount else "SIN_VENTAJA"
             )
-        analyzed_tiers = tuple(
-            QuantityTierAnalysis(
-                min_purchase_unit=tier.min_purchase_unit,
-                amount=quote.amount,
-                analyzed=optimal_economics,
-                status=quote.status,
-                minimum_price=minimum.gross_price,
-                retail_price=retail_price,
-                discount_pct=quote.discount_pct,
+            analyzed_tiers.append(
+                QuantityTierAnalysis(
+                    min_purchase_unit=tier.min_purchase_unit,
+                    amount=amount,
+                    target_margin_pct=margin,
+                    analyzed=economics,
+                    status=status,
+                    minimum_price=minimum.gross_price,
+                    retail_price=retail_price,
+                    discount_pct=quantity_discount_pct(
+                        retail_price=retail_price,
+                        amount=amount,
+                    ),
+                )
             )
-            for tier in tiers
-        )
+            if status == "OPTIMO":
+                previous_amount = amount
+
         return QuantityPricingResponse(
             minimum=minimum,
             target=target,
             retail_price=retail_price,
-            tiers=analyzed_tiers,
+            tiers=tuple(analyzed_tiers),
         )
 
     def calculate_existing_listing(
@@ -289,25 +301,30 @@ class PricingCalculatorService:
         )
 
         analyzed = evaluate(seed_price)
-        solved_targets: dict[Decimal, PriceTargetResult] = {}
+        requested_targets = {
+            Decimal(0),
+            Decimal(15),
+            Decimal(20),
+            self._profile.minimum_margin_pct,
+            effective_target_margin_pct,
+            recommended_target_margin_pct,
+        }
+        if target_margin_pct is not None:
+            requested_targets.add(target_margin_pct)
+        solved_targets = self._optimizer.solve_many(
+            evaluate,
+            tuple(requested_targets),
+            seed_price,
+            tolerance_price=rounding_step,
+        )
 
-        def solve_target(target_margin: Decimal) -> PriceTargetResult:
-            cached = solved_targets.get(target_margin)
-            if cached is not None:
-                return cached
-            solved = self._optimizer.solve(
-                evaluate, target_margin, seed_price, tolerance_price=rounding_step
-            )
-            solved_targets[target_margin] = solved
-            return solved
-
-        mc0 = solve_target(Decimal(0))
-        mc15 = solve_target(Decimal(15))
-        mc20 = solve_target(Decimal(20))
-        minimum = solve_target(self._profile.minimum_margin_pct)
-        target = solve_target(effective_target_margin_pct)
-        custom = solve_target(target_margin_pct) if target_margin_pct is not None else None
-        recommended = solve_target(recommended_target_margin_pct)
+        mc0 = solved_targets[Decimal(0)]
+        mc15 = solved_targets[Decimal(15)]
+        mc20 = solved_targets[Decimal(20)]
+        minimum = solved_targets[self._profile.minimum_margin_pct]
+        target = solved_targets[effective_target_margin_pct]
+        custom = solved_targets[target_margin_pct] if target_margin_pct is not None else None
+        recommended = solved_targets[recommended_target_margin_pct]
         recommended_price = recommended.gross_price
         breakdowns: dict[str, EconomicResult] = {
             "mc0": evaluate(mc0.gross_price),

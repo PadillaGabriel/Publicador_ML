@@ -57,16 +57,22 @@ def evaluate_economics(
         code="SIN_TARIFA_ML",
         name="Mercado Libre percentage fee",
     )
-    if meli_percentage_fee != percentage_fee:
-        raise PricingDomainError(
-            "TARIFA_ML_INCONSISTENTE",
-            "Marketplace percentage fee fields disagree.",
-        )
     financing_add_on_fee = _required_decimal(
         marketplace.financing_add_on_fee,
         code="SIN_TARIFA_ML",
         name="financing add-on fee",
     )
+    if meli_percentage_fee < Decimal(0) or financing_add_on_fee < Decimal(0):
+        raise PricingDomainError(
+            "TARIFA_ML_INCONSISTENTE",
+            "Mercado Libre percentage fee components cannot be negative.",
+        )
+    expected_percentage_fee = meli_percentage_fee + financing_add_on_fee
+    if abs(percentage_fee - expected_percentage_fee) > Decimal("0.01"):
+        raise PricingDomainError(
+            "TARIFA_ML_INCONSISTENTE",
+            "Mercado Libre total percentage fee does not match base commission plus financing.",
+        )
     fixed_fee = _required_decimal(
         marketplace.fixed_fee, code="SIN_TARIFA_ML", name="marketplace fixed fee"
     )
@@ -90,7 +96,13 @@ def evaluate_economics(
     net_price = _money(gross_price / vat_factor)
     net_cmv = _money(gross_cmv / vat_factor)
     taxable_revenue = net_price
-    ml_commission_net = _money(taxable_revenue * _rate_from_marketplace_percentage(percentage_fee))
+    # Mercado Libre exposes the base selling commission separately from financing.
+    # ``percentage_fee`` is the provider's aggregate percentage and may already include
+    # financing (for example, Premium listings). Use ``meli_percentage_fee`` for the
+    # base commission so financing is never counted twice.
+    ml_commission_net = _money(
+        taxable_revenue * _rate_from_marketplace_percentage(meli_percentage_fee)
+    )
     financing_net = _money(
         taxable_revenue * _rate_from_marketplace_percentage(financing_add_on_fee)
     )

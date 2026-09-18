@@ -359,6 +359,13 @@ class MercadoLibrePricingProvider:
                 sorted(str(key) for key in details) if isinstance(details, Mapping) else []
             ),
             "percentage_fee": details.get("percentage_fee") if isinstance(details, Mapping) else None,
+            "meli_percentage_fee": (
+                details.get("meli_percentage_fee") if isinstance(details, Mapping) else None
+            ),
+            "financing_add_on_fee": (
+                details.get("financing_add_on_fee") if isinstance(details, Mapping) else None
+            ),
+            "fixed_fee": details.get("fixed_fee") if isinstance(details, Mapping) else None,
         }
 
     @staticmethod

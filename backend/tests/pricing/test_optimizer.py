@@ -74,3 +74,45 @@ def test_optimizer_raises_when_probe_limit_does_not_reach_target():
         )
 
     assert exc.value.code == "OBJETIVO_NO_CONVERGE"
+
+
+def test_optimizer_solves_multiple_targets_with_shared_probes():
+    optimizer = _optimizer()
+    calls = 0
+
+    def evaluator(price: Decimal) -> EconomicResult:
+        nonlocal calls
+        calls += 1
+        return _economic_result(price / Decimal(100))
+
+    results = optimizer.solve_many(
+        evaluator,
+        (Decimal(0), Decimal(15), Decimal(20), Decimal(35)),
+        Decimal(1000),
+    )
+
+    assert results[Decimal(0)].gross_price == Decimal(1)
+    assert results[Decimal(15)].gross_price == Decimal(1500)
+    assert results[Decimal(20)].gross_price == Decimal(2000)
+    assert results[Decimal(35)].gross_price == Decimal(3500)
+    assert calls < 40
+
+
+def test_optimizer_solve_many_handles_fixed_fee_discontinuity():
+    optimizer = _optimizer()
+
+    def evaluator(price: Decimal) -> EconomicResult:
+        if price < Decimal(33000):
+            return _economic_result(Decimal(19))
+        if price < Decimal(40000):
+            return _economic_result(Decimal(20))
+        return _economic_result(Decimal(35))
+
+    results = optimizer.solve_many(
+        evaluator,
+        (Decimal(20), Decimal(35)),
+        Decimal(30000),
+    )
+
+    assert results[Decimal(20)].gross_price == Decimal(33000)
+    assert results[Decimal(35)].gross_price == Decimal(40000)

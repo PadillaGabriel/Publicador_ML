@@ -63,7 +63,7 @@ def test_iibb_uses_taxable_revenue_instead_of_contribution_margin():
 def test_economics_exposes_each_fee_and_contribution_component():
     """Catches omitting a marketplace fee or a configured economic deduction from MC."""
     marketplace = MarketplaceEconomics(
-        percentage_fee=Decimal(16),
+        percentage_fee=Decimal(18),
         meli_percentage_fee=Decimal(16),
         financing_add_on_fee=Decimal(2),
         fixed_fee=Decimal(1210),

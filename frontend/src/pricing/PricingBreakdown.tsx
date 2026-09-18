@@ -135,6 +135,7 @@ export function PricingBreakdown({ calculation, currencyId = "ARS", showCurrentP
       <div className="pricingLedgerSummary">
         <div><span>Precio de venta</span><b>{money(breakdown.grossPrice, currencyId)}</b></div>
         <div><span>Precio neto sin IVA</span><b>{money(breakdown.netPrice, currencyId)}</b></div>
+        <div><span>Cargo fijo ML informado</span><b>{money(breakdown.fixedFee, currencyId)}</b></div>
         <div><span>Margen</span><b>{breakdown.contributionMarginPct.toFixed(2)}%</b></div>
       </div>
 

@@ -659,8 +659,8 @@ def test_profile_rounding_step_is_applied_to_optimizer_prices():
     assert response.audit.rounding_step == Decimal("100")
 
 
-def test_quantity_tiers_calculate_lowest_sustainable_unit_price_from_minimum_margin():
-    """PxQ must optimize from the configured minimum margin, not from arbitrary discounts."""
+def test_quantity_tiers_step_down_from_target_margin_until_reaching_minimum_margin():
+    """PxQ tiers must be progressive while preserving the configured minimum margin floor."""
     service = PricingCalculatorService(profile=calculator_profile(), provider=CalculatorProvider())
     request = NewProductPricingRequest(
         account_id=uuid4(),
@@ -685,10 +685,12 @@ def test_quantity_tiers_calculate_lowest_sustainable_unit_price_from_minimum_mar
     assert response.minimum.target_margin_pct == Decimal("10")
     assert response.retail_price == Decimal("25000")
     assert [tier.min_purchase_unit for tier in response.tiers] == [3, 6]
+    assert [tier.target_margin_pct for tier in response.tiers] == [Decimal("15"), Decimal("10")]
+    assert response.tiers[0].amount > response.tiers[1].amount
+    assert response.tiers[1].amount == response.minimum.gross_price
     for tier in response.tiers:
-        assert tier.amount == response.minimum.gross_price
-        assert tier.analyzed.gross_price == response.minimum.gross_price
-        assert tier.analyzed.contribution_margin_pct >= Decimal("10")
+        assert tier.analyzed.gross_price == tier.amount
+        assert tier.analyzed.contribution_margin_pct >= tier.target_margin_pct
         assert tier.status == "OPTIMO"
         assert tier.discount_pct > 0
 
@@ -713,6 +715,7 @@ def test_quantity_tiers_report_no_sustainable_advantage_when_retail_is_at_or_bel
     )
 
     tier = response.tiers[0]
+    assert tier.target_margin_pct == Decimal("15")
     assert tier.status == "SIN_VENTAJA"
     assert tier.discount_pct == Decimal("0")
-    assert tier.amount == response.minimum.gross_price
+    assert tier.amount >= response.minimum.gross_price

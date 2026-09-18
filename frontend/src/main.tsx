@@ -942,8 +942,11 @@ function App() {
     });
     const normalized = normalizeQuantityPricing(response);
     setQuantityPricingAnalysis(normalized);
-    setQuantityPrices(current => current.map((tier, index) => {
-      const analysis = normalized.tiers[index];
+    const analysisByQuantity = new Map(
+      normalized.tiers.map(tier => [tier.minPurchaseUnit, tier])
+    );
+    setQuantityPrices(current => current.map(tier => {
+      const analysis = analysisByQuantity.get(tier.min_purchase_unit);
       return {
         ...tier,
         amount: analysis?.status === "OPTIMO" ? analysis.amount : 0,
@@ -1077,14 +1080,40 @@ function App() {
     setActiveView("price-calculator");
   }
 
-  async function createProduct() {
-    if (!accountId || !categoryId) throw new Error("Elegí cuenta y una categoría hoja sugerida por Mercado Libre.");
-    if (quantityPricingEnabled) {
-      if (!quantityPrices.length) throw new Error("Agregá al menos un escalón mayorista.");
-      if (quantityPrices.some(tier => tier.min_purchase_unit <= 1 || tier.amount <= 0)) {
-        throw new Error("Calculá precios mayoristas óptimos antes de guardar el producto.");
+  function validateQuantityPricingForSave() {
+    if (!quantityPricingEnabled) return;
+    if (!quantityPrices.length) throw new Error("Agregá al menos un escalón mayorista.");
+    if (quantityPrices.some(tier => tier.min_purchase_unit <= 1 || tier.amount <= 0)) {
+      throw new Error("Calculá los precios mayoristas o completalos manualmente antes de guardar el producto.");
+    }
+    if (!quantityPricingAnalysis) {
+      throw new Error("Calculá los precios mayoristas al menos una vez para validar el piso de rentabilidad.");
+    }
+    const analysisByQuantity = new Map(
+      quantityPricingAnalysis.tiers.map(tier => [tier.minPurchaseUnit, tier])
+    );
+    for (const tier of quantityPrices) {
+      const analysis = analysisByQuantity.get(tier.min_purchase_unit);
+      if (!analysis) {
+        throw new Error("Recalculá los precios mayoristas después de modificar las cantidades.");
+      }
+      if (tier.amount + 0.005 < analysis.minimumPrice) {
+        throw new Error(
+          `El precio desde ${tier.min_purchase_unit} unidades no puede ser menor a ${money(analysis.minimumPrice)} porque perforaría tu MC mínimo.`
+        );
       }
     }
+    const orderedTiers = [...quantityPrices].sort((a,b)=>a.min_purchase_unit-b.min_purchase_unit);
+    for (let index = 1; index < orderedTiers.length; index += 1) {
+      if (orderedTiers[index].amount >= orderedTiers[index - 1].amount) {
+        throw new Error("Cada escalón mayorista debe tener un precio unitario menor que el escalón anterior.");
+      }
+    }
+  }
+
+  async function createProduct() {
+    if (!accountId || !categoryId) throw new Error("Elegí cuenta y una categoría hoja sugerida por Mercado Libre.");
+    validateQuantityPricingForSave();
     if (!form.sku.trim() || !form.name.trim()) throw new Error("Completá SKU y nombre interno.");
     if (categoryContractLoading) {
       throw new Error("Esperá a que termine de cargar el contrato de categoría de Mercado Libre.");
@@ -1131,6 +1160,7 @@ function App() {
       await createProduct();
       return;
     }
+    validateQuantityPricingForSave();
     if (!requiredAttributesComplete) {
       throw new Error("Completá los atributos obligatorios antes de revalidar el lote.");
     }
@@ -1839,6 +1869,8 @@ function App() {
               {Number(form.price) > 0 && <div className="publisherCurrentPrice">
                 <div><span>Precio actual</span><b>{money(form.price)}</b></div>
                 <div><span>Margen actual</span><b>{Number(pricingAnalysis.analyzed.contribution_margin_pct).toFixed(2)}%</b></div>
+                <div><span>Comisión ML neta</span><b>{money(pricingAnalysis.analyzed.ml_commission_net || 0)}</b></div>
+                <div><span>Cargo fijo ML</span><b>{money(pricingAnalysis.analyzed.fixed_fee || 0)}</b></div>
                 <div><span>Resultado por venta</span><b>{money(pricingAnalysis.analyzed.contribution_margin)}</b></div>
               </div>}
               <div className="publisherPricingTargets">
@@ -1862,17 +1894,24 @@ function App() {
             {quantityPricingEnabled && <>
               <div className="quantityPriceRows">
                 {quantityPrices.map((tier,index)=>{
-                  const analysis = quantityPricingAnalysis?.tiers[index];
+                  const analysis = quantityPricingAnalysis?.tiers.find(
+                    item => item.minPurchaseUnit === tier.min_purchase_unit
+                  );
+                  const manualOverride = Boolean(
+                    analysis && tier.amount > 0 && Math.abs(tier.amount - analysis.amount) >= 0.01
+                  );
                   return <div className="quantityPriceRow" key={index}>
                     <label>Desde<input type="number" min="2" value={tier.min_purchase_unit} onChange={e=>updateQuantityPriceTier(index,{min_purchase_unit:Number(e.target.value),amount:0})}/></label>
-                    <label>Precio óptimo unitario ARS<input type="number" value={tier.amount || ""} readOnly placeholder="Se calcula automáticamente"/></label>
+                    <label>Precio unitario ARS<input type="number" min="0.01" step="0.01" value={tier.amount || ""} onChange={e=>updateQuantityPriceTier(index,{amount:Number(e.target.value) || 0})} placeholder="Calculá o ingresá un precio"/></label>
                     <div className="quantityTierEconomics">
                       {analysis ? <>
-                        <span className={`tierRisk ${analysis.status === "OPTIMO" ? "ok" : "bad"}`}>{analysis.status === "OPTIMO" ? "ÓPTIMO" : "SIN VENTAJA"}</span>
-                        <small>MC estimado: <b>{analysis.contributionMarginPct}%</b> · {money(analysis.contributionMargin)}</small>
-                        <small>Minorista: <b>{money(analysis.retailPrice)}</b> · Piso económico: <b>{money(analysis.minimumPrice)}</b></small>
-                        <small>{analysis.status === "OPTIMO" ? <>Descuento sostenible máximo: <b>{analysis.discountPct}%</b></> : <>No existe un descuento sostenible frente al precio minorista actual.</>}</small>
-                      </> : <small>El precio se calcula automáticamente usando el margen mínimo configurado.</small>}
+                        <span className={`tierRisk ${analysis.status === "OPTIMO" ? "ok" : "bad"}`}>{analysis.status === "OPTIMO" ? `MC OBJETIVO ${analysis.targetMarginPct}%` : "SIN NUEVO ESCALÓN"}</span>
+                        <small>Precio sugerido: <b>{money(analysis.amount)}</b> · MC logrado: <b>{analysis.contributionMarginPct}%</b></small>
+                        <small>Minorista: <b>{money(analysis.retailPrice)}</b> · Piso MC mínimo: <b>{money(analysis.minimumPrice)}</b></small>
+                        {manualOverride
+                          ? <small>Precio editado manualmente. No bajes de {money(analysis.minimumPrice)} para conservar el MC mínimo configurado.</small>
+                          : <small>{analysis.status === "OPTIMO" ? <>Descuento sugerido: <b>{analysis.discountPct}%</b></> : <>El margen mínimo ya fue alcanzado; no hay un escalón automático adicional sostenible.</>}</small>}
+                      </> : <small>Cada escalón baja 5 puntos desde el MC objetivo, sin perforar el MC mínimo. Después del cálculo podés ajustar el precio manualmente.</small>}
                     </div>
                     <button type="button" className="tiny dangerButton" onClick={()=>removeQuantityPriceTier(index)}>Eliminar</button>
                   </div>;
@@ -1882,7 +1921,7 @@ function App() {
                 <button type="button" className="secondary" disabled={quantityPrices.length >= 5} onClick={addQuantityPriceTier}>+ Agregar escalón mayorista</button>
                 <button type="button" className="secondary" disabled={!pricingConfigured || !quantityPrices.length || busy} onClick={()=>run(simulateQuantityPrices)}>Calcular precios óptimos</button>
               </div>
-              <small className="helper">Máximo 5 escalones. El sistema busca el precio unitario más bajo que conserva el margen mínimo configurado; no aplica porcentajes de descuento arbitrarios.</small>
+              <small className="helper">Máximo 5 escalones. El primero apunta a 5 puntos menos que tu MC objetivo; cada escalón siguiente baja otros 5 puntos hasta llegar al MC mínimo, que nunca se perfora. Los precios calculados quedan editables.</small>
             </>}
           </div>
           <label>Descripción<textarea disabled={!contextComplete} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></label>
