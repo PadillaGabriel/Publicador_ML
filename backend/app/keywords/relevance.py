@@ -20,7 +20,7 @@ CLASSIFICATION_WEIGHTS = {
 class RankedTrend:
     term: str
     popularity_rank: int
-    semantic_similarity: float
+    semantic_similarity: float | None
     lexical_coverage: float
     final_score: float
     eligible: bool
@@ -102,7 +102,7 @@ def build_product_evidence(
 
 def rank_trends(
     trends: list[str],
-    semantic_scores: list[float],
+    semantic_scores: list[float | None],
     factual_tokens: set[str],
     *,
     min_semantic_similarity: float,
@@ -123,17 +123,27 @@ def rank_trends(
         unsupported = tuple(sorted(set(term_tokens) - factual_tokens))
         lexical_coverage = len(supported) / len(term_tokens)
         factual_safe = not unsupported
-        semantic_relevant = semantic_score >= min_semantic_similarity
-        eligible = factual_safe and semantic_relevant
-        preliminary_score = 0.75 * max(0.0, semantic_score) + 0.25 * lexical_coverage
+        if semantic_score is None:
+            semantic_relevant = True
+            preliminary_score = lexical_coverage
+            normalized_semantic_score = None
+        else:
+            normalized_semantic_score = min(max(semantic_score, 0.0), 1.0)
+            semantic_relevant = normalized_semantic_score >= min_semantic_similarity
+            preliminary_score = 0.75 * normalized_semantic_score + 0.25 * lexical_coverage
+
         ranked.append(
             RankedTrend(
                 term=term,
                 popularity_rank=popularity_rank,
-                semantic_similarity=round(semantic_score, 6),
+                semantic_similarity=(
+                    None
+                    if normalized_semantic_score is None
+                    else round(normalized_semantic_score, 6)
+                ),
                 lexical_coverage=round(lexical_coverage, 6),
                 final_score=round(preliminary_score, 6),
-                eligible=eligible,
+                eligible=factual_safe and semantic_relevant,
                 unsupported_tokens=unsupported,
             )
         )
@@ -179,13 +189,15 @@ def select_assessed_keywords(
             continue
 
         popularity_score = 1.0 if total == 1 else 1.0 - ((item.popularity_rank - 1) / (total - 1))
-        semantic_score = min(max(item.semantic_similarity, 0.0), 1.0)
-        final_score = (
-            0.45 * classification_weight
-            + 0.30 * popularity_score
-            + 0.20 * semantic_score
-            + 0.05 * item.lexical_coverage
-        )
+        weighted_signals = [
+            (0.45, classification_weight),
+            (0.30, popularity_score),
+            (0.05, item.lexical_coverage),
+        ]
+        if item.semantic_similarity is not None:
+            weighted_signals.append((0.20, item.semantic_similarity))
+        available_weight = sum(weight for weight, _score in weighted_signals)
+        final_score = sum(weight * score for weight, score in weighted_signals) / available_weight
         scored.append(
             {
                 "term": item.term,

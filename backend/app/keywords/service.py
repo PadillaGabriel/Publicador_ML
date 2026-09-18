@@ -20,7 +20,7 @@ from app.keywords.relevance import (
     rank_trends,
     select_assessed_keywords,
 )
-from app.keywords.semantic import LocalSemanticRanker, SemanticModelError
+from app.keywords.prerank import semantic_prerank
 from app.persistence import KeywordSnapshot, KeywordTrendSnapshot, ProductVersion
 
 logger = logging.getLogger("ml-keyword-intelligence")
@@ -198,27 +198,12 @@ def build_ml_keyword_snapshot(
             started=started,
         )
 
-    logger.info(
-        "semantic_prerank_started product_version=%s model=%s candidates=%d",
-        version.id,
-        settings.keyword_embedding_model,
-        len(trends),
+    similarities, semantic_model_status, semantic_model = semantic_prerank(
+        settings=settings,
+        product_version_id=version.id,
+        product_text=product_text,
+        trends=trends,
     )
-    semantic_model_status = "AVAILABLE"
-    try:
-        similarities = LocalSemanticRanker(settings.keyword_embedding_model).similarities(
-            product_text,
-            trends,
-        )
-    except SemanticModelError as exc:
-        semantic_model_status = "UNAVAILABLE_FALLBACK_ZERO"
-        similarities = [0.0] * len(trends)
-        logger.warning(
-            "semantic_prerank_unavailable product_version=%s model=%s error=%s",
-            version.id,
-            settings.keyword_embedding_model,
-            exc,
-        )
 
     ranked = rank_trends(
         trends,
@@ -287,9 +272,11 @@ def build_ml_keyword_snapshot(
             "trend_cache_status": cache_status,
             "trend_fetched_at": trend_snapshot.fetched_at.isoformat(),
             "trend_expires_at": trend_snapshot.expires_at.isoformat(),
-            "semantic_model": settings.keyword_embedding_model,
+            "semantic_model": semantic_model,
             "semantic_model_status": semantic_model_status,
-            "semantic_min_similarity": settings.keyword_min_semantic_similarity,
+            "semantic_min_similarity": (
+                settings.keyword_min_semantic_similarity if semantic_model is not None else None
+            ),
             "trend_analyzer": {
                 "model": provider["model"],
                 "prompt_version": provider["prompt_version"],
@@ -329,8 +316,9 @@ def build_ml_keyword_snapshot(
                 for item in scored_terms
             ],
             "note": (
-                "Mercado Libre trend order remains a popularity signal. Local lexical/embedding similarity is only a pre-ranking signal. "
-                "OpenAI classifies low-overlap synonyms and related search intent without being allowed to invent product claims. "
+                "Mercado Libre trend order remains a popularity signal. Local lexical evidence is always available; "
+                "embedding similarity is an optional pre-ranking signal. OpenAI classifies low-overlap synonyms and "
+                "related search intent without being allowed to invent product claims. "
                 "Final keyword scores are computed deterministically by the application, not by the model."
             ),
         },

@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     ml_request_timeout_seconds: float = 20.0
     ml_live_publication_enabled: bool = False
 
+    keyword_local_embeddings_enabled: bool = False
     keyword_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     hf_token: str = ""
     keyword_max_trends: int = 50
