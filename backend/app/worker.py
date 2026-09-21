@@ -5,10 +5,11 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from app.accounts.service import load_access_token
 from app.core.config import get_settings
-from app.core.db import SessionLocal
+from app.core.db import SessionLocal, reset_connection_pool
 from app.core.enums import DraftStatus, JobItemStatus, JobStatus
 from app.core.time import utcnow
 from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
@@ -30,23 +31,104 @@ logger = logging.getLogger("ml-worker")
 settings = get_settings()
 
 
+def _db_retry_delay(attempt: int) -> float:
+    base = max(0.1, float(settings.worker_db_retry_base_seconds))
+    ceiling = max(base, float(settings.worker_db_retry_max_seconds))
+    return min(ceiling, base * (2 ** max(0, attempt - 1)))
+
+
+def _recover_db_connection(stage: str, exc: OperationalError, attempt: int) -> float:
+    reset_connection_pool()
+    delay = _db_retry_delay(attempt)
+    logger.warning(
+        "worker_database_unavailable stage=%s attempt=%d retry_in_seconds=%.1f error=%s",
+        stage,
+        attempt,
+        delay,
+        exc.__class__.__name__,
+    )
+    return delay
+
+
+def _run_control_db_action(stage: str, action, *, max_attempts: int | None = None) -> None:
+    """Retry idempotent worker-control DB operations without terminating the worker."""
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with SessionLocal() as db:
+                action(db)
+            return
+        except OperationalError as exc:
+            if max_attempts is not None and attempt >= max_attempts:
+                reset_connection_pool()
+                raise
+            time.sleep(_recover_db_connection(stage, exc, attempt))
+
+
+def _reconcile_ambiguous_claim(job_id: uuid.UUID, claimed_at) -> bool:
+    """Return whether a claim COMMIT that lost its response actually persisted.
+
+    ``started_at`` is written by this exact claim before COMMIT, so matching both the
+    job id and timestamp distinguishes our durable claim from another worker's claim.
+    """
+
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with SessionLocal() as db:
+                job = db.get(Job, job_id)
+                return bool(
+                    job
+                    and job.status == JobStatus.RUNNING
+                    and job.started_at == claimed_at
+                )
+        except OperationalError as exc:
+            time.sleep(_recover_db_connection("claim_reconcile", exc, attempt))
+
+
 def claim_job():
-    with SessionLocal() as db:
-        job = db.scalar(
-            select(Job)
-            .where(Job.status == JobStatus.PENDING)
-            .order_by(Job.created_at)
-            .with_for_update(skip_locked=True)
-            .limit(1)
-        )
-        if not job:
-            return None
-        job.status = JobStatus.RUNNING
-        job.started_at = utcnow()
-        job_id = job.id
-        db.commit()
-        logger.info("publication_job_claimed job=%s total=%d", job_id, job.total)
-        return job_id
+    attempt = 0
+    while True:
+        attempt += 1
+        try:
+            with SessionLocal() as db:
+                job = db.scalar(
+                    select(Job)
+                    .where(Job.status == JobStatus.PENDING)
+                    .order_by(Job.created_at)
+                    .with_for_update(skip_locked=True)
+                    .limit(1)
+                )
+                if not job:
+                    return None
+
+                claimed_at = utcnow()
+                job.status = JobStatus.RUNNING
+                job.started_at = claimed_at
+                job_id = job.id
+                total = job.total
+                try:
+                    db.commit()
+                except OperationalError as exc:
+                    # The server can close the socket after receiving COMMIT. Do not
+                    # blindly repeat the claim: first determine whether it persisted.
+                    reset_connection_pool()
+                    if _reconcile_ambiguous_claim(job_id, claimed_at):
+                        logger.warning(
+                            "publication_job_claim_reconciled job=%s reason=ambiguous_commit",
+                            job_id,
+                        )
+                        return job_id
+                    time.sleep(_recover_db_connection("claim_commit", exc, attempt))
+                    continue
+
+                logger.info("publication_job_claimed job=%s total=%d", job_id, total)
+                return job_id
+        except OperationalError as exc:
+            time.sleep(_recover_db_connection("claim_select", exc, attempt))
 
 
 def ordered_images_for_worker(version: ProductVersion, draft: PublicationDraft) -> list:
@@ -547,8 +629,10 @@ def process_job(job_id: uuid.UUID, *, worker_instance_id: uuid.UUID):
 
     picture_cache: dict[str, str] = {}
     for item_id in item_ids:
-        with SessionLocal() as db:
-            heartbeat_worker(db, instance_id=worker_instance_id)
+        _run_control_db_action(
+            "job_heartbeat_before_item",
+            lambda db: heartbeat_worker(db, instance_id=worker_instance_id),
+        )
         ok = process_item(item_id, picture_cache)
         with SessionLocal() as db:
             heartbeat_worker(db, instance_id=worker_instance_id)
@@ -613,8 +697,10 @@ def process_job(job_id: uuid.UUID, *, worker_instance_id: uuid.UUID):
 
 def run():
     instance_id = uuid.uuid4()
-    with SessionLocal() as db:
-        register_worker(db, instance_id=instance_id)
+    _run_control_db_action(
+        "register",
+        lambda db: register_worker(db, instance_id=instance_id),
+    )
     logger.info(
         "publication_worker_started instance=%s poll_seconds=%.1f live_enabled=%s",
         instance_id,
@@ -623,8 +709,10 @@ def run():
     )
     try:
         while True:
-            with SessionLocal() as db:
-                heartbeat_worker(db, instance_id=instance_id)
+            _run_control_db_action(
+                "heartbeat",
+                lambda db: heartbeat_worker(db, instance_id=instance_id),
+            )
             job_id = claim_job()
             if job_id:
                 process_job(job_id, worker_instance_id=instance_id)
@@ -632,8 +720,11 @@ def run():
                 time.sleep(settings.worker_poll_seconds)
     finally:
         try:
-            with SessionLocal() as db:
-                unregister_worker(db, instance_id=instance_id)
+            _run_control_db_action(
+                "unregister",
+                lambda db: unregister_worker(db, instance_id=instance_id),
+                max_attempts=1,
+            )
         except Exception:
             logger.exception("publication_worker_unregister_failed instance=%s", instance_id)
 
