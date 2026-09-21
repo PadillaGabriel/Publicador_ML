@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     database_pool_size: int = 8
     database_max_overflow: int = 8
     database_pool_timeout_seconds: float = 15.0
+    database_pool_recycle_seconds: int = 300
 
     cors_origins: str = "http://localhost:5173"
 
@@ -70,6 +71,8 @@ class Settings(BaseSettings):
     worker_base_backoff_seconds: float = 2.0
     worker_heartbeat_stale_seconds: float = 30.0
     worker_image_upload_concurrency: int = 3
+    worker_db_retry_base_seconds: float = 1.0
+    worker_db_retry_max_seconds: float = 15.0
     job_event_poll_seconds: float = 1.5
 
 
