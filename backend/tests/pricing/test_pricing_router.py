@@ -10,6 +10,7 @@ from app.pricing.application.calculator import (
     PricingCalculatorService,
 )
 from app.pricing.application.optimizer import PriceTargetResult
+from app.integrations.mercadolibre.client import MercadoLibreError
 from app.pricing.domain import PricingDomainError
 from app.pricing.domain.models import EconomicResult
 from app.pricing.router import router
@@ -261,3 +262,36 @@ def test_build_calculator_service_reuses_process_pricing_cache(monkeypatch):
     assert isinstance(service, PricingCalculatorService)
     assert captured["seller_id"] == "244878077"
     assert captured["cache"] is pricing_router._pricing_simulation_cache
+
+
+def test_existing_calculator_marketplace_failure_does_not_escape_as_500(monkeypatch):
+    from app.pricing import router as pricing_router
+
+    class MarketplaceFailureService:
+        def calculate_existing_listing(self, request):
+            raise MercadoLibreError(
+                "Mercado Libre HTTP 503",
+                503,
+                {"message": "temporarily unavailable"},
+            )
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[pricing_router.get_db] = lambda: object()
+    monkeypatch.setattr(
+        pricing_router,
+        "build_calculator_service",
+        lambda db, account_id: MarketplaceFailureService(),
+    )
+
+    response = TestClient(app).post(
+        "/api/pricing/calculator/existing",
+        json={
+            "account_id": str(uuid4()),
+            "item_id": "MLA123456789",
+            "gross_cmv": "1000",
+        },
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"]["code"] == "MERCADOLIBRE_PRICING_UNAVAILABLE"

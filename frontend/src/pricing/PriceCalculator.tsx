@@ -51,6 +51,19 @@ function dimensionParts(dimensions: string) {
   return { length, width, height };
 }
 
+
+function normalizeMlaInput(value: string) {
+  const raw = value.trim();
+  if (/^\d{1,20}$/.test(raw)) return `MLA${raw}`;
+
+  const match = raw.match(/(?:^|[^A-Z0-9])MLA[-_ ]?(\d{1,20})(?!\d)/i);
+  if (match) return `MLA${match[1]}`;
+
+  throw new Error(
+    "Ingresá un MLA válido, por ejemplo MLA123456789, el número del MLA o su URL de Mercado Libre."
+  );
+}
+
 export function PriceCalculator({
   accountId = "",
   accounts,
@@ -216,7 +229,7 @@ export function PriceCalculator({
         gross_cmv: optionalNumber(form.grossCmv),
       };
       const payload = mode === "existing"
-        ? { ...base, item_id: form.itemId || null }
+        ? { ...base, item_id: normalizeMlaInput(form.itemId) }
         : {
           ...base,
           sale_price: optionalNumber(form.salePrice),

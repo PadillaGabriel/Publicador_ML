@@ -2,7 +2,9 @@ from decimal import Decimal
 from typing import Literal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from app.pricing.identifiers import normalize_mla_item_id
 
 CostKind = Literal[
     "FIXED_MONTHLY",
@@ -128,6 +130,11 @@ class ExistingListingPricingRequest(BaseModel):
     gross_cmv: Decimal | None = Field(default=None, ge=0)
     target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     overrides: EconomicOverrides = Field(default_factory=EconomicOverrides)
+
+    @field_validator("item_id", "mla_id", mode="before")
+    @classmethod
+    def normalize_item_identifier(cls, value: object) -> str | None:
+        return normalize_mla_item_id(value)
 
 
 class EconomicResultResponse(BaseModel):

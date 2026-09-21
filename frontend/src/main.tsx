@@ -882,6 +882,18 @@ function App() {
     setMessage("Configuración económica guardada.");
   }
 
+  function publisherPricingValidationError() {
+    if (!accountId) return "Seleccioná una cuenta de Mercado Libre.";
+    if (!categoryId) return "Elegí una categoría antes de calcular.";
+    if (!pricingListingTypeId) return "Elegí la modalidad de publicación que querés analizar.";
+    if (!(Number(productCost) > 0)) return "Ingresá un costo de producto mayor a cero.";
+    if (!simulationPackage.dimensions.trim()) return "Completá las dimensiones del paquete.";
+    if (!(Number(simulationPackage.weight) > 0)) return "Completá el peso del paquete.";
+    if (!shippingReady) return "Esperá a que Mercado Libre confirme el contexto logístico.";
+    if (simulationPackage.freeShipping === "") return "Indicá quién paga el envío.";
+    return "";
+  }
+
   function publisherPricingPayload(salePrice: number | null) {
     return {
       account_id: accountId,
@@ -901,10 +913,8 @@ function App() {
 
   async function simulateCurrentPrice() {
     if (!pricingConfigured) throw new Error("Configurá primero Costos y rentabilidad.");
-    const listingTypeId = pricingListingTypeId;
-    if (!accountId || !categoryId || !listingTypeId) {
-      throw new Error("Elegí cuenta, categoría y la modalidad de Mercado Libre que querés analizar.");
-    }
+    const validationError = publisherPricingValidationError();
+    if (validationError) throw new Error(validationError);
     const result = await api<any>("/api/pricing/simulate", {
       method: "POST",
       body: JSON.stringify(publisherPricingPayload(Number(form.price) > 0 ? Number(form.price) : null)),
@@ -927,9 +937,8 @@ function App() {
 
   async function simulateQuantityPrices() {
     if (!pricingConfigured) throw new Error("Configurá primero Costos y rentabilidad.");
-    if (!accountId || !categoryId || !pricingListingTypeId) {
-      throw new Error("Completá cuenta, categoría y modalidad antes de analizar precios mayoristas.");
-    }
+    const validationError = publisherPricingValidationError();
+    if (validationError) throw new Error(validationError);
     if (!quantityPrices.length) throw new Error("Agregá al menos un escalón mayorista.");
     const invalidTier = quantityPrices.some(tier => tier.min_purchase_unit <= 1);
     if (invalidTier) throw new Error("Completá cantidades mayores a 1.");
@@ -1862,7 +1871,7 @@ function App() {
               {activeCommercialAllocations.length === 1 && <div className="pricingResolvedContext"><span>Modalidad</span><b>{activeCommercialAllocations[0].listing_type_name}</b><small>Se toma automáticamente de la configuración del lote.</small></div>}
             </div>
             <div className="pricingProposalActions">
-              <button type="button" disabled={!contextComplete || !pricingConfigured || !Number(productCost) || busy} onClick={()=>run(simulateCurrentPrice)}>{busy ? "Calculando…" : "Calcular propuestas"}</button>
+              <button type="button" disabled={!pricingConfigured || Boolean(publisherPricingValidationError()) || busy} onClick={()=>run(simulateCurrentPrice)}>{busy ? "Calculando…" : "Calcular propuestas"}</button>
               <span>Usa la categoría, modalidad y logística ya cargadas en esta ficha.</span>
             </div>
             {pricingAnalysis && <div className="publisherPricingStory">
@@ -1919,7 +1928,7 @@ function App() {
               </div>
               <div className="quantityPricingActions">
                 <button type="button" className="secondary" disabled={quantityPrices.length >= 5} onClick={addQuantityPriceTier}>+ Agregar escalón mayorista</button>
-                <button type="button" className="secondary" disabled={!pricingConfigured || !quantityPrices.length || busy} onClick={()=>run(simulateQuantityPrices)}>Calcular precios óptimos</button>
+                <button type="button" className="secondary" disabled={!pricingConfigured || !quantityPrices.length || Boolean(publisherPricingValidationError()) || busy} onClick={()=>run(simulateQuantityPrices)}>Calcular precios óptimos</button>
               </div>
               <small className="helper">Máximo 5 escalones. El primero apunta a 5 puntos menos que tu MC objetivo; cada escalón siguiente baja otros 5 puntos hasta llegar al MC mínimo, que nunca se perfora. Los precios calculados quedan editables.</small>
             </>}

@@ -548,3 +548,44 @@ def test_provider_maps_shipping_http_error_to_domain_error() -> None:
 
     assert exc_info.value.code == "SIN_CONTEXTO_LOGISTICO"
     assert "shipping option not found" in str(exc_info.value)
+
+
+class ExistingListingErrorClient(ListingPricesFixtureClient):
+    def __init__(self, status_code: int) -> None:
+        super().__init__(load_fixture("listing_prices.json"))
+        self.status_code = status_code
+
+    def item(self, item_id: str):
+        raise MercadoLibreError(
+            f"Mercado Libre HTTP {self.status_code}",
+            self.status_code,
+            {"message": "provider rejection"},
+        )
+
+    def item_prices(self, item_id: str, *, show_all: bool = True):
+        raise AssertionError("item_prices must not run after the item lookup failed")
+
+
+@pytest.mark.parametrize("status_code", [400, 404])
+def test_existing_listing_invalid_item_is_translated_to_domain_error(status_code: int) -> None:
+    provider = mercadolibre.MercadoLibrePricingProvider(
+        ExistingListingErrorClient(status_code),
+        seller_id="244878077",
+    )
+
+    with pytest.raises(PricingDomainError) as exc:
+        provider.resolve_existing_listing(account_id=uuid4(), item_id="MLA123456789")
+
+    assert exc.value.code == "MERCADOLIBRE_ITEM_INVALID"
+
+
+def test_existing_listing_transient_marketplace_error_is_not_hidden() -> None:
+    provider = mercadolibre.MercadoLibrePricingProvider(
+        ExistingListingErrorClient(503),
+        seller_id="244878077",
+    )
+
+    with pytest.raises(MercadoLibreError) as exc:
+        provider.resolve_existing_listing(account_id=uuid4(), item_id="MLA123456789")
+
+    assert exc.value.status_code == 503

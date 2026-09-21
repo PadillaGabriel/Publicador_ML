@@ -1,3 +1,4 @@
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -5,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.accounts.service import load_access_token
 from app.core.db import get_db
-from app.integrations.mercadolibre.client import MercadoLibreClient
+from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
 from app.persistence import MercadoLibreAccount
 from app.pricing.application.calculator import PricingCalculatorService
 from app.pricing.domain import PricingDomainError
@@ -26,6 +27,7 @@ from app.pricing.service import (
     upsert_default_profile,
 )
 
+logger = logging.getLogger("pricing")
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
 _pricing_simulation_cache = PricingSimulationCache()
 
@@ -55,6 +57,37 @@ def build_calculator_service(db: Session, account_id: UUID | None) -> PricingCal
 
 def _calculator_error(exc: PricingDomainError) -> HTTPException:
     return HTTPException(status_code=422, detail={"code": exc.code, "message": str(exc)})
+
+
+def _marketplace_error(exc: MercadoLibreError) -> HTTPException:
+    status_code = 503 if exc.retryable else 502
+    message = (
+        "Mercado Libre no está disponible temporalmente. Volvé a intentar en unos instantes."
+        if exc.retryable
+        else "Mercado Libre rechazó la consulta de pricing. Revisá el contexto informado."
+    )
+    return HTTPException(
+        status_code=status_code,
+        detail={"code": "MERCADOLIBRE_PRICING_UNAVAILABLE", "message": message},
+    )
+
+
+def _log_pricing_rejection(endpoint: str, payload: object, exc: PricingDomainError) -> None:
+    package = getattr(payload, "package", None)
+    logger.warning(
+        "pricing_request_rejected endpoint=%s code=%s category=%s listing_type=%s "
+        "dimensions_present=%s weight_present=%s logistic_type=%s shipping_mode=%s "
+        "free_shipping=%s",
+        endpoint,
+        exc.code,
+        getattr(payload, "category_id", None),
+        getattr(payload, "listing_type_id", None),
+        bool(getattr(package, "dimensions", None)),
+        getattr(package, "weight", None) is not None,
+        getattr(package, "logistic_type", None),
+        getattr(package, "shipping_mode", None),
+        getattr(package, "free_shipping", None),
+    )
 
 
 @router.get("/profile")
@@ -100,7 +133,10 @@ def pricing_simulation(
             )
         )
     except PricingDomainError as exc:
+        _log_pricing_rejection("simulate", payload, exc)
         raise _calculator_error(exc) from exc
+    except MercadoLibreError as exc:
+        raise _marketplace_error(exc) from exc
     return PricingCalculatorResponse.model_validate(calculation)
 
 
@@ -112,7 +148,10 @@ def calculate_new_product(
         service = build_calculator_service(db, payload.account_id)
         calculation = service.calculate_new_product(payload)
     except PricingDomainError as exc:
+        _log_pricing_rejection("calculator/new", payload, exc)
         raise _calculator_error(exc) from exc
+    except MercadoLibreError as exc:
+        raise _marketplace_error(exc) from exc
     return PricingCalculatorResponse.model_validate(calculation)
 
 
@@ -124,7 +163,10 @@ def calculate_existing_listing(
         service = build_calculator_service(db, payload.account_id)
         calculation = service.calculate_existing_listing(payload)
     except PricingDomainError as exc:
+        _log_pricing_rejection("calculator/existing", payload, exc)
         raise _calculator_error(exc) from exc
+    except MercadoLibreError as exc:
+        raise _marketplace_error(exc) from exc
     return PricingCalculatorResponse.model_validate(calculation)
 
 
@@ -158,5 +200,8 @@ def calculate_quantity_tiers(
             payload.tiers,
         )
     except PricingDomainError as exc:
+        _log_pricing_rejection("quantity-tiers", payload, exc)
         raise _calculator_error(exc) from exc
+    except MercadoLibreError as exc:
+        raise _marketplace_error(exc) from exc
     return QuantityPricingResponse.model_validate(calculation)

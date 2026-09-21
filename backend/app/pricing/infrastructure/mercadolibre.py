@@ -102,8 +102,28 @@ class MercadoLibrePricingProvider:
         self, *, account_id: UUID, item_id: str
     ) -> ExistingListingContext:
         del account_id  # The account is carried by the application simulation context.
-        item = self._client.item(item_id)
-        prices = self._client.item_prices(item_id, show_all=True)
+        try:
+            item = self._client.item(item_id)
+            prices = self._client.item_prices(item_id, show_all=True)
+        except MercadoLibreError as exc:
+            message = self._marketplace_error_message(exc)
+            logger.warning(
+                "pricing_existing_listing_lookup_failed item_id=%s http_status=%s provider_message=%s",
+                item_id,
+                exc.status_code,
+                message,
+            )
+            if exc.status_code in {400, 404}:
+                raise PricingDomainError(
+                    "MERCADOLIBRE_ITEM_INVALID",
+                    "Mercado Libre no pudo resolver la publicación informada. Verificá el MLA y que siga disponible.",
+                ) from exc
+            if exc.status_code in {401, 403}:
+                raise PricingDomainError(
+                    "MERCADOLIBRE_ITEM_ACCESS_DENIED",
+                    "La cuenta seleccionada no tiene acceso a la publicación informada.",
+                ) from exc
+            raise
         if not isinstance(item, Mapping) or not isinstance(prices, Mapping):
             raise PricingDomainError("SIN_BASELINE_CONFIABLE", "Invalid existing listing baseline.")
         shipping = item.get("shipping")
