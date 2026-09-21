@@ -4,7 +4,11 @@ import pytest
 
 from app.pricing.application.optimizer import PriceOptimizer
 from app.pricing.domain import EconomicInputs, MarketplaceEconomics, evaluate_economics
-from app.publication.quantity_pricing import b2b_quantity_price_payload, normalize_b2b_quantity_prices
+from app.publication.quantity_pricing import (
+    QuantityPricingSyncError,
+    b2b_percentage_payload,
+    normalize_b2b_quantity_prices,
+)
 
 
 def test_pricing_engine_solves_break_even_and_target_margin():
@@ -62,24 +66,70 @@ def test_b2b_quantity_prices_are_sorted_and_must_decrease():
         )
 
 
-def test_b2b_payload_preserves_non_b2b_prices_and_replaces_old_b2b_nodes():
+def test_b2b_percentage_payload_reuses_ids_and_preserves_margin_safe_amounts():
     current = {
-        "prices": [
-            {"id": "1", "conditions": {"context_restrictions": []}},
-            {"id": "2", "conditions": {"context_restrictions": ["channel_marketplace"]}},
-            {"id": "3", "conditions": {"context_restrictions": ["channel_marketplace", "user_type_business"], "min_purchase_unit": 5}},
+        "price_per_quantity": [
+            {
+                "id": "20",
+                "type": "discount_percentage",
+                "percentage": 5,
+                "conditions": {
+                    "context_restrictions": ["channel_marketplace", "user_type_business"],
+                    "min_purchase_unit": 2,
+                    "eligible": True,
+                },
+            }
         ]
     }
-    payload = b2b_quantity_price_payload(
+    recommendations = {
+        "recommendations": [
+            {
+                "quantity": 2,
+                "amount": 960,
+                "is_incoherent_quantity": False,
+                "discount": {"percentage": 4},
+            },
+            {
+                "quantity": 3,
+                "amount": 910,
+                "is_incoherent_quantity": False,
+                "discount": {"percentage": 9},
+            },
+        ]
+    }
+    payload = b2b_percentage_payload(
         current,
-        [{"min_purchase_unit": 5, "amount": Decimal("850")}],
-        "ARS",
+        [
+            {"min_purchase_unit": 2, "amount": Decimal("950")},
+            {"min_purchase_unit": 3, "amount": Decimal("900")},
+        ],
+        recommendations,
+        standard_amount=Decimal("1000"),
     )
-    assert payload["prices"][0:2] == [{"id": "1"}, {"id": "2"}]
-    assert all(price.get("id") != "3" for price in payload["prices"])
-    assert payload["prices"][-1]["conditions"]["context_restrictions"] == [
-        "channel_marketplace", "user_type_business"
-    ]
+
+    assert payload["price_per_quantity"][0]["id"] == "20"
+    assert payload["price_per_quantity"][0]["percentage"] == 5.0
+    assert payload["price_per_quantity"][1]["percentage"] == 10.0
+    assert payload["price_per_quantity"][1]["conditions"]["eligible"] is True
+
+
+def test_b2b_percentage_payload_refuses_marketplace_discount_that_would_erode_margin():
+    with pytest.raises(QuantityPricingSyncError, match="proteger el margen"):
+        b2b_percentage_payload(
+            {},
+            [{"min_purchase_unit": 2, "amount": Decimal("950")}],
+            {
+                "recommendations": [
+                    {
+                        "quantity": 2,
+                        "amount": 900,
+                        "is_incoherent_quantity": False,
+                        "discount": {"percentage": 10},
+                    }
+                ]
+            },
+            standard_amount=Decimal("1000"),
+        )
 
 
 def test_pricing_separates_base_commission_financing_and_fixed_fee():

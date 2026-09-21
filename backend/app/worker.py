@@ -17,7 +17,11 @@ from app.persistence import (
 )
 from app.publication.errors import build_mercadolibre_error
 from app.publication.payload import build_item_payload, publication_title_intent
-from app.publication.quantity_pricing import normalize_b2b_quantity_prices, sync_b2b_quantity_prices
+from app.publication.quantity_pricing import (
+    QuantityPricingSyncError,
+    normalize_b2b_quantity_prices,
+    sync_b2b_quantity_prices,
+)
 from app.products.storage import cleanup_temporary_product_images
 from app.worker_runtime import heartbeat_worker, register_worker, unregister_worker
 
@@ -196,16 +200,21 @@ def _sync_quantity_prices(
             item_id=publication.item_id,
             tiers=tiers,
             currency_id=version.currency_id,
+            base_price=version.price,
         )
         _set_quantity_price_sync(
             publication,
             status="SYNCED",
             detail={
                 "http_status": result["http_status"],
+                "model": "discount_percentage",
+                "price_version": result["version"],
+                "standard_amount": float(result["standard_amount"]),
                 "tiers": [
                     {"min_purchase_unit": row["min_purchase_unit"], "amount": float(row["amount"])}
                     for row in tiers
                 ],
+                "price_per_quantity": result["request"].get("price_per_quantity") or [],
             },
         )
         db.commit()
@@ -214,6 +223,23 @@ def _sync_quantity_prices(
             draft.id, publication.item_id, len(tiers),
         )
         return None
+    except QuantityPricingSyncError as exc:
+        error = {
+            "code": "QUANTITY_PRICE_POLICY_CONFLICT",
+            "message": str(exc),
+            "retryable": False,
+        }
+        _set_quantity_price_sync(
+            publication,
+            status="FAILED",
+            detail={"error": error},
+        )
+        db.commit()
+        logger.warning(
+            "publication_quantity_prices_policy_conflict draft=%s item_id=%s message=%s",
+            draft.id, publication.item_id, str(exc),
+        )
+        return error
     except MercadoLibreError as exc:
         error = build_mercadolibre_error(exc, retryable=False)
         error["code"] = "QUANTITY_PRICE_SYNC_FAILED"

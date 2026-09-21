@@ -90,12 +90,22 @@ class MercadoLibreClient:
         self._raise(response)
         return response.json()
 
-    def post(self, path: str, payload: dict) -> PublishResponse:
+    def post(
+        self,
+        path: str,
+        payload: dict,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> PublishResponse:
         try:
             response = _get_shared_http_client(self._base_url, self._timeout).post(
                 path,
                 json=payload,
-                headers={**self._headers(), "Content-Type": "application/json"},
+                headers={
+                    **self._headers(),
+                    "Content-Type": "application/json",
+                    **(extra_headers or {}),
+                },
             )
         except httpx.TimeoutException as exc:
             raise MercadoLibreError("Mercado Libre publish request timed out.") from exc
@@ -300,17 +310,57 @@ class MercadoLibreClient:
             raise MercadoLibreError("Unexpected shipping options response.")
         return value
 
-    def item_prices(self, item_id: str, *, show_all: bool = True) -> dict:
+    def item_prices(
+        self,
+        item_id: str,
+        *,
+        show_all: bool = True,
+        display_version: bool = False,
+    ) -> dict:
+        suffix = "?display_version=true" if display_version else ""
         value = self.get(
-            f"/items/{item_id}/prices",
+            f"/items/{item_id}/prices{suffix}",
             extra_headers={"show-all-prices": "true"} if show_all else None,
         )
         if not isinstance(value, dict):
             raise MercadoLibreError("Unexpected item prices response.")
         return value
 
-    def set_b2b_quantity_prices(self, item_id: str, payload: dict) -> PublishResponse:
-        return self.post(f"/items/{item_id}/prices/standard/quantity", payload)
+    def b2b_quantity_price_recommendations(
+        self,
+        *,
+        item_id: str,
+        quantities: list[int],
+        standard_amount: object,
+        currency_id: str,
+    ) -> dict:
+        response = self.post(
+            "/prices-per-quantity/v1/recommendations",
+            {
+                "item_id": item_id,
+                "range_item_quantities": quantities,
+                "price": {
+                    "standard_amount": float(standard_amount),
+                    "currency": currency_id,
+                },
+            },
+        )
+        return response.payload
+
+    def set_b2b_quantity_discounts(
+        self,
+        item_id: str,
+        payload: dict,
+        *,
+        version: str,
+        remove_absolute_pxq: bool = False,
+    ) -> PublishResponse:
+        query = "?remove-absolute-pxq=true" if remove_absolute_pxq else ""
+        return self.post(
+            f"/items/{item_id}/prices/price-per-quantity{query}",
+            payload,
+            extra_headers={"X-Version": version},
+        )
 
 
 class MercadoLibreOAuthClient:
