@@ -98,6 +98,23 @@ type ExistingProduct = {
 
 type UploadedImage = {id: string; original_name: string; position: number; mime_type: string};
 type QuantityPriceTier = {min_purchase_unit: number; amount: number};
+type ToastKind = "success" | "info" | "warning" | "error";
+type ToastNotice = {id: number; message: string; kind: ToastKind};
+
+function ToastItem({notice, dismiss}: {notice: ToastNotice; dismiss: (id: number) => void}) {
+  useEffect(() => {
+    if (notice.kind === "error") return;
+    const duration = notice.kind === "warning" ? 8000 : notice.kind === "success" ? 4000 : 5000;
+    const timer = window.setTimeout(() => dismiss(notice.id), duration);
+    return () => window.clearTimeout(timer);
+  }, [notice.id, notice.kind, dismiss]);
+  return <div className={`toastNotice toast-${notice.kind}`} role={notice.kind === "error" ? "alert" : "status"}>
+    <span className="toastSymbol" aria-hidden="true">{notice.kind === "error" ? "!" : notice.kind === "warning" ? "!" : notice.kind === "success" ? "✓" : "i"}</span>
+    <div className="toastBody"><strong>{notice.kind === "error" ? "Error" : notice.kind === "warning" ? "Advertencia" : notice.kind === "success" ? "Operación completada" : "Información"}</strong><p>{notice.message}</p></div>
+    <button type="button" className="toastClose" aria-label="Cerrar notificación" onClick={() => dismiss(notice.id)}>×</button>
+  </div>;
+}
+
 type CommercialAllocation = CommercialOption & {count: number};
 const TERMINAL_JOB_STATES = ["COMPLETED", "PARTIAL", "FAILED", "CANCELLED"];
 const GTIN_ATTRIBUTE_ID = "GTIN";
@@ -215,7 +232,20 @@ function App() {
   const [keywordIntelligence, setKeywordIntelligence] = useState<any>(null);
   const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
   const [generationActive, setGenerationActive] = useState(false);
-  const [message, setMessage] = useState("");
+  const [toasts, setToasts] = useState<ToastNotice[]>([]);
+  const toastSequence = useRef(0);
+  const dismissToast = React.useCallback((id: number) => {
+    setToasts(current => current.filter(toast => toast.id !== id));
+  }, []);
+  function notify(message: string, kind: ToastKind = "info") {
+    if (!message.trim()) return;
+    setToasts(current => {
+      if (current.some(toast => toast.message === message && toast.kind === kind)) return current;
+      return [...current, {id: ++toastSequence.current, message, kind}].slice(-3);
+    });
+  }
+  function setMessage(message: string) { notify(message); }
+
   const [busy, setBusy] = useState(false);
   const [accountModal, setAccountModal] = useState(false);
   const [manualMode, setManualMode] = useState(false);
@@ -237,6 +267,7 @@ function App() {
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
   const [activeView, setActiveView] = useState<"publisher" | "pricing-settings" | "price-calculator">("publisher");
+  const [publisherStep, setPublisherStep] = useState<"category" | "technical" | "prices" | "shipping" | "images" | "review" | "execution">("category");
   const [pricingConfigured, setPricingConfigured] = useState(false);
   const [pricingProfile, setPricingProfile] = useState<PricingProfile>({
     name: "Mercado Libre", channel: "MERCADOLIBRE", currency_id: "ARS",
@@ -765,12 +796,14 @@ function App() {
       warrantyUnit: String(version.commercial?.warranty?.unit || "days"),
     }));
 
-    const savedQuantityPrices = Array.isArray(version.commercial?.quantity_prices) ? version.commercial.quantity_prices : [];
+    const savedQuantityPrices = Array.isArray(version.commercial?.quantity_prices_draft)
+      ? version.commercial.quantity_prices_draft
+      : Array.isArray(version.commercial?.quantity_prices) ? version.commercial.quantity_prices : [];
     setQuantityPrices(savedQuantityPrices.map((tier:any) => ({
       min_purchase_unit: Number(tier.min_purchase_unit),
       amount: Number(tier.amount),
     })));
-    setQuantityPricingEnabled(savedQuantityPrices.length > 0);
+    setQuantityPricingEnabled(Boolean(version.commercial?.quantity_pricing_enabled ?? savedQuantityPrices.length > 0));
     const savedPricing = version.commercial?.pricing_analysis || null;
     const savedPricingInputs = savedPricing?.publisher_inputs || {};
     const savedPackage = version.logistics?.pricing_package || savedPricingInputs.package || {};
@@ -882,18 +915,6 @@ function App() {
     setMessage("Configuración económica guardada.");
   }
 
-  function publisherPricingValidationError() {
-    if (!accountId) return "Seleccioná una cuenta de Mercado Libre.";
-    if (!categoryId) return "Elegí una categoría antes de calcular.";
-    if (!pricingListingTypeId) return "Elegí la modalidad de publicación que querés analizar.";
-    if (!(Number(productCost) > 0)) return "Ingresá un costo de producto mayor a cero.";
-    if (!simulationPackage.dimensions.trim()) return "Completá las dimensiones del paquete.";
-    if (!(Number(simulationPackage.weight) > 0)) return "Completá el peso del paquete.";
-    if (!shippingReady) return "Esperá a que Mercado Libre confirme el contexto logístico.";
-    if (simulationPackage.freeShipping === "") return "Indicá quién paga el envío.";
-    return "";
-  }
-
   function publisherPricingPayload(salePrice: number | null) {
     return {
       account_id: accountId,
@@ -913,8 +934,10 @@ function App() {
 
   async function simulateCurrentPrice() {
     if (!pricingConfigured) throw new Error("Configurá primero Costos y rentabilidad.");
-    const validationError = publisherPricingValidationError();
-    if (validationError) throw new Error(validationError);
+    const listingTypeId = pricingListingTypeId;
+    if (!accountId || !categoryId || !listingTypeId) {
+      throw new Error("Elegí cuenta, categoría y la modalidad de Mercado Libre que querés analizar.");
+    }
     const result = await api<any>("/api/pricing/simulate", {
       method: "POST",
       body: JSON.stringify(publisherPricingPayload(Number(form.price) > 0 ? Number(form.price) : null)),
@@ -937,8 +960,9 @@ function App() {
 
   async function simulateQuantityPrices() {
     if (!pricingConfigured) throw new Error("Configurá primero Costos y rentabilidad.");
-    const validationError = publisherPricingValidationError();
-    if (validationError) throw new Error(validationError);
+    if (!accountId || !categoryId || !pricingListingTypeId) {
+      throw new Error("Completá cuenta, categoría y modalidad antes de analizar precios mayoristas.");
+    }
     if (!quantityPrices.length) throw new Error("Agregá al menos un escalón mayorista.");
     const invalidTier = quantityPrices.some(tier => tier.min_purchase_unit <= 1);
     if (invalidTier) throw new Error("Completá cantidades mayores a 1.");
@@ -1032,7 +1056,27 @@ function App() {
     };
   }
 
+  function quantityPricingSnapshot() {
+    const draft = quantityPricingEnabled ? quantityPrices.map(tier => ({
+      min_purchase_unit: Number(tier.min_purchase_unit),
+      amount: Number(tier.amount),
+    })) : [];
+    // El borrador comercial nunca debe confundirse con los escalones enviados a ML.
+    // Sólo se habilita el envío de una tabla completa y compatible con las reglas B2B.
+    const ordered = [...draft].sort((a, b) => a.min_purchase_unit - b.min_purchase_unit);
+    const basePrice = Number(form.price);
+    const valid = ordered.length > 0 && ordered.length <= 5 && Number.isFinite(basePrice) && basePrice > 0
+      && ordered.every((tier, index) =>
+        Number.isInteger(tier.min_purchase_unit) && tier.min_purchase_unit > 1
+        && Number.isFinite(tier.amount) && tier.amount > 0
+        && tier.amount < (index === 0 ? basePrice : ordered[index - 1].amount)
+        && (index === 0 || tier.min_purchase_unit !== ordered[index - 1].min_purchase_unit)
+      );
+    return {draft, publishable: valid ? ordered : [], valid};
+  }
+
   function currentCommercialContract() {
+    const tiers = quantityPricingSnapshot();
     return {
       buying_mode: "buy_it_now",
       warranty: {
@@ -1040,10 +1084,9 @@ function App() {
         duration: form.warrantyType === "SELLER" ? Number(form.warrantyDuration) : 0,
         unit: form.warrantyUnit,
       },
-      quantity_prices: quantityPricingEnabled ? quantityPrices.map(tier => ({
-        min_purchase_unit: Number(tier.min_purchase_unit),
-        amount: Number(tier.amount),
-      })) : [],
+      quantity_pricing_enabled: quantityPricingEnabled,
+      quantity_prices_draft: tiers.draft,
+      quantity_prices: tiers.publishable,
       pricing_analysis: pricingAnalysis,
     };
   }
@@ -1089,50 +1132,39 @@ function App() {
     setActiveView("price-calculator");
   }
 
-  function validateQuantityPricingForSave() {
+  function warnQuantityPricing() {
     if (!quantityPricingEnabled) return;
-    if (!quantityPrices.length) throw new Error("Agregá al menos un escalón mayorista.");
-    if (quantityPrices.some(tier => tier.min_purchase_unit <= 1 || tier.amount <= 0)) {
-      throw new Error("Calculá los precios mayoristas o completalos manualmente antes de guardar el producto.");
-    }
-    if (!quantityPricingAnalysis) {
-      throw new Error("Calculá los precios mayoristas al menos una vez para validar el piso de rentabilidad.");
+    const snapshot = quantityPricingSnapshot();
+    if (!snapshot.valid) {
+      notify("Ficha guardable: los escalones mayoristas incompletos o incompatibles con Mercado Libre se conservarán como borrador y NO se publicarán hasta corregirlos.", "warning");
+      return;
     }
     const analysisByQuantity = new Map(
-      quantityPricingAnalysis.tiers.map(tier => [tier.minPurchaseUnit, tier])
+      (quantityPricingAnalysis?.tiers || []).map(tier => [tier.minPurchaseUnit, tier])
     );
-    for (const tier of quantityPrices) {
+    const belowFloor = snapshot.publishable.filter(tier => {
       const analysis = analysisByQuantity.get(tier.min_purchase_unit);
-      if (!analysis) {
-        throw new Error("Recalculá los precios mayoristas después de modificar las cantidades.");
-      }
-      if (tier.amount + 0.005 < analysis.minimumPrice) {
-        throw new Error(
-          `El precio desde ${tier.min_purchase_unit} unidades no puede ser menor a ${money(analysis.minimumPrice)} porque perforaría tu MC mínimo.`
-        );
-      }
-    }
-    const orderedTiers = [...quantityPrices].sort((a,b)=>a.min_purchase_unit-b.min_purchase_unit);
-    for (let index = 1; index < orderedTiers.length; index += 1) {
-      if (orderedTiers[index].amount >= orderedTiers[index - 1].amount) {
-        throw new Error("Cada escalón mayorista debe tener un precio unitario menor que el escalón anterior.");
-      }
+      return analysis && tier.amount + 0.005 < analysis.minimumPrice;
+    });
+    if (belowFloor.length) {
+      notify(
+        `Precio(s) desde ${belowFloor.map(tier => tier.min_purchase_unit).join(", ")} unidades por debajo del piso de MC configurado. Es una advertencia económica: se conservarán tus precios manuales.`,
+        "warning"
+      );
+    } else if (snapshot.publishable.some(tier => !analysisByQuantity.has(tier.min_purchase_unit))) {
+      notify("Sin simulación económica vigente para todos los escalones. Podés operar con los precios ingresados; el cálculo es opcional.", "warning");
     }
   }
 
   async function createProduct() {
     if (!accountId || !categoryId) throw new Error("Elegí cuenta y una categoría hoja sugerida por Mercado Libre.");
-    validateQuantityPricingForSave();
+    warnQuantityPricing();
     if (!form.sku.trim() || !form.name.trim()) throw new Error("Completá SKU y nombre interno.");
     if (categoryContractLoading) {
       throw new Error("Esperá a que termine de cargar el contrato de categoría de Mercado Libre.");
     }
-    if (!requiredAttributesComplete) {
-      throw new Error("Completá los atributos obligatorios informados por Mercado Libre.");
-    }
-    if (!shippingReady) {
-      throw new Error("Esperá a que Mercado Libre confirme la configuración de Mercado Envíos para esta categoría.");
-    }
+    // Guardar ficha y adjuntar imágenes no requiere validación de publicación.
+    // La completitud de atributos y la logística se comprueban antes de publicar.
     const payload = {
       internal_sku: form.sku.trim(),
       internal_name: form.name.trim(),
@@ -1169,7 +1201,7 @@ function App() {
       await createProduct();
       return;
     }
-    validateQuantityPricingForSave();
+    warnQuantityPricing();
     if (!requiredAttributesComplete) {
       throw new Error("Completá los atributos obligatorios antes de revalidar el lote.");
     }
@@ -1487,8 +1519,8 @@ function App() {
   }
 
   async function run<T>(fn: () => Promise<T>) {
-    setBusy(true); setMessage("");
-    try { await fn(); } catch (e:any) { setMessage(e.message); }
+    setBusy(true);
+    try { await fn(); } catch (e:any) { notify(e instanceof Error ? e.message : String(e), "error"); }
     finally { setBusy(false); }
   }
 
@@ -1635,6 +1667,9 @@ function App() {
 
   return (
     <div className="app">
+      <div className="toastViewport" aria-label="Notificaciones">
+        {toasts.map(toast => <ToastItem key={toast.id} notice={toast} dismiss={dismissToast}/>)}
+      </div>
       <aside>
         <div className="brand">Publicador ML</div>
         <div className="muted">Gestión masiva de publicaciones</div>
@@ -1643,12 +1678,24 @@ function App() {
           <button className={activeView === "pricing-settings" ? "active" : ""} onClick={()=>setActiveView("pricing-settings")}>Configuración</button>
           <button className={activeView === "price-calculator" ? "active" : ""} onClick={()=>setActiveView("price-calculator")}>Calculadora</button>
         </div>
-        <nav className="sideSteps">
-          <div className={contextComplete ? "done" : "active"}><span>1</span> Producto y categoría</div>
-          <div className={productComplete ? "done" : contextComplete ? "active" : ""}><span>2</span> Ficha técnica</div>
-          <div className={draftsComplete ? "done" : productComplete ? "active" : ""}><span>3</span> Lote y cuotas</div>
-          <div className={approvedCount ? "done" : draftsComplete ? "active" : ""}><span>4</span> Revisión</div>
-          <div className={terminalJob ? "done" : approvedCount ? "active" : ""}><span>5</span> Publicación</div>
+        <nav className="sideSteps" aria-label="Etapas del publicador">
+          {([
+            ["category", "Producto y categoría", contextComplete],
+            ["technical", "Ficha técnica", productComplete],
+            ["prices", "Precios", Number(form.price) > 0],
+            ["shipping", "Logística", shippingReady],
+            ["images", "Imágenes y lote", uploadedImages.length > 0],
+            ["review", "Revisión", draftsComplete],
+            ["execution", "Publicación", Boolean(terminalJob)],
+          ] as const).map(([key, label, complete], index) =>
+            <button
+              key={key}
+              type="button"
+              className={`wizardStep ${publisherStep === key ? "active" : complete ? "done" : ""}`}
+              aria-current={publisherStep === key ? "step" : undefined}
+              onClick={() => {setActiveView("publisher"); setPublisherStep(key);}}
+            ><span>{index + 1}</span>{label}</button>
+          )}
         </nav>
         <div className="status">
           <span className="dot"/> Publicación real protegida por configuración
@@ -1656,12 +1703,12 @@ function App() {
       </aside>
 
       <main style={{display: activeView === "pricing-settings" ? undefined : "none"}}>
-        {message && <div className="notice">{message}</div>}
+        
         <PricingProfileEditor profile={pricingProfile} busy={busy} onChange={setPricingProfile} onSave={() => run(savePricingProfile)} />
       </main>
 
       <main style={{display: activeView === "price-calculator" ? undefined : "none"}}>
-        {message && <div className="notice">{message}</div>}
+        
         <PriceCalculator
           accountId={accountId}
           accounts={accounts}
@@ -1688,9 +1735,27 @@ function App() {
           <div><span>Borradores</span><b>{drafts.length}</b></div>
         </section>
 
-        {message && <div className="notice">{message}</div>}
+        
 
-        <section className="card">
+
+        <div className="wizardNavigation" role="navigation" aria-label="Navegación de la ficha">
+          <div className="wizardNavigationHeading">
+            <strong>{({category: "Producto y categoría", technical: "Ficha técnica", prices: "Precios", shipping: "Logística", images: "Imágenes y lote", review: "Revisión", execution: "Publicación"} as const)[publisherStep]}</strong>
+            <span>Podés navegar libremente. Los campos conservan su contenido mientras cambiás de etapa.</span>
+          </div>
+          <div className="wizardNavigationActions">
+            <button type="button" className="secondary" disabled={publisherStep === "category"} onClick={() => setPublisherStep((current) => {
+              const steps = ["category", "technical", "prices", "shipping", "images", "review", "execution"] as const;
+              return steps[Math.max(0, steps.indexOf(current) - 1)];
+            })}>← Anterior</button>
+            <button type="button" disabled={publisherStep === "execution"} onClick={() => setPublisherStep((current) => {
+              const steps = ["category", "technical", "prices", "shipping", "images", "review", "execution"] as const;
+              return steps[Math.min(steps.length - 1, steps.indexOf(current) + 1)];
+            })}>Siguiente →</button>
+          </div>
+        </div>
+
+        <section className="card" style={{display: publisherStep === "category" ? undefined : "none"}}>
           <div className="sectionTitle"><span>1</span> Producto y categoría</div>
           <div className="grid2">
             <label>Cuenta
@@ -1812,8 +1877,9 @@ function App() {
           /></>}
         </section>
 
-        <section className={`card ${!contextComplete ? "locked" : ""}`}>
-          <div className="sectionTitle"><span>2</span> Ficha técnica</div>
+        <section className={`card ${!contextComplete ? "locked" : ""}`} style={{display: ["technical", "prices", "shipping"].includes(publisherStep) ? undefined : "none"}}>
+          <div className="sectionTitle"><span>2</span> {publisherStep === "prices" ? "Precios y rentabilidad" : publisherStep === "shipping" ? "Logística y envíos" : "Ficha técnica"}</div>
+          <div style={{display: publisherStep === "technical" ? undefined : "none"}}>
           {(mlaPreview || technicalReuse) && <div className="technicalReusePanel">
             <div className="technicalReuseIntro">
               <div>
@@ -1829,9 +1895,13 @@ function App() {
           </div>}
           {!contextComplete && <div className="lockedMessage">Ingresá el producto, buscá categorías y confirmá una categoría hoja para continuar.</div>}
           <div className="grid3">
-            <label>Precio ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>{setForm({...form,price:e.target.value});setPricingAnalysis(null);}}/></label>
             <label>Stock<input disabled={!contextComplete} type="number" value={form.quantity} onChange={e=>setForm({...form,quantity:e.target.value})}/></label>
           </div>
+          </div>
+          <div style={{display: publisherStep === "prices" ? undefined : "none"}} className="wizardPricingMainPrice">
+            <label>Precio de venta ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>{setForm({...form,price:e.target.value});setPricingAnalysis(null);}}/></label>
+          </div>
+          <div style={{display: publisherStep === "shipping" ? undefined : "none"}}>
           <div className="publisherShippingContext">
             <div className="publisherContextHeader">
               <div><h3>Datos de envío</h3><p className="helper blockHelper">Estos datos describen el paquete y se reutilizan para publicación y cálculo de costos. No son parámetros económicos.</p></div>
@@ -1860,6 +1930,8 @@ function App() {
             </div>
           </div>
 
+          </div>
+          <div style={{display: publisherStep === "prices" ? undefined : "none"}}>
           <div className="economicSimulator pricingProposalPanel">
             <div className="economicSimulatorHeader">
               <div><h3>Propuestas de precio</h3><p className="helper blockHelper">Ingresá únicamente el costo del producto. El resto se toma de Configuración y de Mercado Libre.</p></div>
@@ -1871,7 +1943,7 @@ function App() {
               {activeCommercialAllocations.length === 1 && <div className="pricingResolvedContext"><span>Modalidad</span><b>{activeCommercialAllocations[0].listing_type_name}</b><small>Se toma automáticamente de la configuración del lote.</small></div>}
             </div>
             <div className="pricingProposalActions">
-              <button type="button" disabled={!pricingConfigured || Boolean(publisherPricingValidationError()) || busy} onClick={()=>run(simulateCurrentPrice)}>{busy ? "Calculando…" : "Calcular propuestas"}</button>
+              <button type="button" disabled={!contextComplete || !pricingConfigured || !Number(productCost) || busy} onClick={()=>run(simulateCurrentPrice)}>{busy ? "Calculando…" : "Calcular propuestas"}</button>
               <span>Usa la categoría, modalidad y logística ya cargadas en esta ficha.</span>
             </div>
             {pricingAnalysis && <div className="publisherPricingStory">
@@ -1918,7 +1990,7 @@ function App() {
                         <small>Precio sugerido: <b>{money(analysis.amount)}</b> · MC logrado: <b>{analysis.contributionMarginPct}%</b></small>
                         <small>Minorista: <b>{money(analysis.retailPrice)}</b> · Piso MC mínimo: <b>{money(analysis.minimumPrice)}</b></small>
                         {manualOverride
-                          ? <small>Precio editado manualmente. No bajes de {money(analysis.minimumPrice)} para conservar el MC mínimo configurado.</small>
+                          ? <small>Precio editado manualmente. Por debajo de {money(analysis.minimumPrice)} se reduce el MC bajo el mínimo recomendado; podés guardar igualmente.</small>
                           : <small>{analysis.status === "OPTIMO" ? <>Descuento sugerido: <b>{analysis.discountPct}%</b></> : <>El margen mínimo ya fue alcanzado; no hay un escalón automático adicional sostenible.</>}</small>}
                       </> : <small>Cada escalón baja 5 puntos desde el MC objetivo, sin perforar el MC mínimo. Después del cálculo podés ajustar el precio manualmente.</small>}
                     </div>
@@ -1928,11 +2000,14 @@ function App() {
               </div>
               <div className="quantityPricingActions">
                 <button type="button" className="secondary" disabled={quantityPrices.length >= 5} onClick={addQuantityPriceTier}>+ Agregar escalón mayorista</button>
-                <button type="button" className="secondary" disabled={!pricingConfigured || !quantityPrices.length || Boolean(publisherPricingValidationError()) || busy} onClick={()=>run(simulateQuantityPrices)}>Calcular precios óptimos</button>
+                <button type="button" className="secondary" disabled={!pricingConfigured || !quantityPrices.length || busy} onClick={()=>run(simulateQuantityPrices)}>Calcular precios óptimos</button>
               </div>
-              <small className="helper">Máximo 5 escalones. El primero apunta a 5 puntos menos que tu MC objetivo; cada escalón siguiente baja otros 5 puntos hasta llegar al MC mínimo, que nunca se perfora. Los precios calculados quedan editables.</small>
+              <small className="helper">Máximo 5 escalones. Podés guardar la ficha y cargar imágenes sin calcular precios. Los escalones incompletos se conservan como borrador y no se envían a Mercado Libre; los precios manuales completos pueden publicarse si cumplen las reglas del marketplace. El MC es orientativo.</small>
+              {!quantityPricingSnapshot().valid && <div className="optionalNotice" role="status">Precios mayoristas en borrador: podés guardar la ficha y cargar imágenes. Esta tabla todavía no se enviará a Mercado Libre.</div>}
             </>}
           </div>
+          </div>
+          <div style={{display: publisherStep === "technical" ? undefined : "none"}}>
           <label>Descripción<textarea disabled={!contextComplete} value={form.description} onChange={e=>setForm({...form,description:e.target.value})}/></label>
           <div className="grid3">
             <label className="checkboxLabel">
@@ -2012,21 +2087,25 @@ function App() {
               {showSecondaryAttributes && <div className="grid3 secondaryGrid">{secondaryFields.map(field => renderAttributeField(field))}</div>}
             </div>}
           </>}
+          </div>
           <button
-            disabled={!contextComplete || categoryContractLoading || shippingCapabilitiesLoading || !shippingReady || !requiredAttributesComplete || busy}
+            disabled={!contextComplete || categoryContractLoading || busy || (Boolean(batchId) && drafts.length > 0 && (!shippingReady || !requiredAttributesComplete))}
             onClick={()=>run(batchId && drafts.length > 0 ? saveCorrectionsAndRevalidate : createProduct)}
           >
             {batchId && drafts.length > 0
               ? "Guardar correcciones y revalidar lote"
               : existingProduct ? "Guardar nueva versión" : "Guardar ficha"}
           </button>
+          {(!shippingReady || !requiredAttributesComplete) && !(batchId && drafts.length > 0) && <p className="helper blockHelper" role="status">
+            Podés guardar la ficha y cargar imágenes aunque falten atributos obligatorios o Mercado Libre no haya confirmado la logística. Esos pendientes deberán resolverse antes de publicar.
+          </p>}
           {batchId && drafts.length > 0 && <p className="helper blockHelper">
             Si la validación detecta un dato faltante, completalo acá y guardá las correcciones. La app crea un nuevo snapshot de la ficha, conserva los borradores e imágenes y vuelve a validar el lote sin recargar la página.
           </p>}
         </section>
 
-        <section className={`card ${!productComplete ? "locked" : ""}`}>
-          <div className="sectionTitle"><span>3</span> Imágenes y plan del lote</div>
+        <section className={`card ${!productComplete ? "locked" : ""}`} style={{display: publisherStep === "images" ? undefined : "none"}}>
+          <div className="sectionTitle"><span>5</span> Imágenes y plan del lote</div>
           {!productComplete && <div className="lockedMessage">Guardá la ficha maestra para definir el lote.</div>}
           <div className="grid2">
             <label>Imágenes
@@ -2079,7 +2158,7 @@ function App() {
           <button disabled={!versionId || busy || distributionInvalid} onClick={()=>run(generateDrafts)}>Generar borradores con IA</button>
         </section>
 
-        {drafts.length > 0 && <section className="card wide">
+        {drafts.length > 0 && <section className="card wide" style={{display: publisherStep === "review" ? undefined : "none"}}>
           <div className="toolbar">
             <div>
               <div className="sectionTitle"><span>4</span> Revisión de borradores</div>
@@ -2140,7 +2219,9 @@ function App() {
           </div>
         </section>}
 
-        {job && <section className="card">
+        {publisherStep === "review" && drafts.length === 0 && <div className="card wizardEmpty">Generá los borradores en Imágenes y lote para revisarlos acá.</div>}
+        {publisherStep === "execution" && !job && <div className="card wizardEmpty">Seleccioná y publicá borradores aprobados desde Revisión para ver la ejecución.</div>}
+        {job && <section className="card" style={{display: publisherStep === "execution" ? undefined : "none"}}>
           <div className="toolbar executionHeader">
             <div className="sectionTitle"><span>5</span> Ejecución</div>
             {terminalJob && job.succeeded > 0 &&

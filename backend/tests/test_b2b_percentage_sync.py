@@ -69,3 +69,20 @@ def test_sync_uses_percentage_endpoint_contract_and_version():
     assert remove_absolute is True
     assert [row["percentage"] for row in payload["price_per_quantity"]] == [5.0, 10.0]
     assert result["http_status"] == 200
+
+
+def test_seller_price_is_not_rejected_or_replaced_by_recommendation():
+    client = FakeClient()
+    def strict_recommendations(**kwargs):
+        return {"recommendations": [
+            {"quantity": 2, "amount": 700, "discount": {"percentage": 30}},
+            {"quantity": 3, "amount": 650, "discount": {"percentage": 35}},
+        ]}
+    client.b2b_quantity_price_recommendations = strict_recommendations
+    sync_b2b_quantity_prices(
+        client, item_id="MLA123",
+        tiers=[{"min_purchase_unit": 2, "amount": Decimal("950")},
+               {"min_purchase_unit": 3, "amount": Decimal("900")}],
+        currency_id="ARS", base_price=Decimal("1000"),
+    )
+    assert [r["percentage"] for r in client.write[1]["price_per_quantity"]] == [5.0, 10.0]

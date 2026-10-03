@@ -268,11 +268,20 @@ def _set_quantity_price_sync(publication: Publication, *, status: str, detail: d
 def _sync_quantity_prices(
     db, *, client: MercadoLibreClient, publication: Publication, version: ProductVersion, draft: PublicationDraft
 ) -> dict | None:
-    tiers = normalize_b2b_quantity_prices(version.commercial, base_price=version.price)
+    commercial = version.commercial or {}
+    tiers = normalize_b2b_quantity_prices(commercial, base_price=version.price)
     if not tiers:
-        _set_quantity_price_sync(publication, status="NOT_REQUESTED")
+        draft_tiers = commercial.get("quantity_prices_draft") or []
+        _set_quantity_price_sync(
+            publication,
+            status="PENDING" if draft_tiers else "NOT_REQUESTED",
+            detail={"error": {"code": "QUANTITY_PRICE_DRAFT_INCOMPLETE",
+                              "message": "Hay precios mayoristas en borrador sin completar o validar."}}
+            if draft_tiers else None,
+        )
         db.commit()
-        return None
+        return {"code": "QUANTITY_PRICE_DRAFT_INCOMPLETE",
+                "message": "Los precios mayoristas siguen en borrador y no fueron enviados."} if draft_tiers else None
     if _quantity_price_sync_status(publication) == "SYNCED":
         return None
 

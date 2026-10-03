@@ -35,78 +35,78 @@ class ShippingCapabilities:
 
 
 def _category_me2_types(preferences: Mapping[str, Any]) -> set[str]:
+    """Read all ME2 category entries, not only the first one.
+
+    These are category-advertised logistics; their absence is not proof that an
+    active seller default (e.g. cross_docking) is forbidden for an item.
+    """
+    result: set[str] = set()
     logistics = preferences.get("logistics")
     if not isinstance(logistics, list):
-        return set()
+        return result
     for entry in logistics:
         if not isinstance(entry, Mapping) or str(entry.get("mode") or "") != ME2_MODE:
             continue
         raw_types = entry.get("types")
-        if not isinstance(raw_types, list):
-            return set()
-        return {str(item).strip() for item in raw_types if str(item).strip()}
-    return set()
+        if isinstance(raw_types, list):
+            result.update(str(item).strip() for item in raw_types if isinstance(item, str) and item.strip())
+    return result
 
 
 def _active_user_me2_types(preferences: Mapping[str, Any]) -> list[tuple[str, bool]]:
+    """Collect active seller logistics across all ME2 entries, preserving order."""
     logistics = preferences.get("logistics")
     if not isinstance(logistics, list):
         return []
+    result: list[tuple[str, bool]] = []
     for entry in logistics:
         if not isinstance(entry, Mapping) or str(entry.get("mode") or "") != ME2_MODE:
             continue
         raw_types = entry.get("types")
         if not isinstance(raw_types, list):
-            return []
-        result: list[tuple[str, bool]] = []
+            continue
         for item in raw_types:
             if not isinstance(item, Mapping):
                 continue
             type_id = str(item.get("type") or "").strip()
-            status = str(item.get("status") or "active").strip().lower()
-            if type_id and status == "active":
-                result.append((type_id, bool(item.get("default"))))
-        return result
-    return []
+            status = str(item.get("status") or "").strip().lower()
+            if type_id in ME2_LOGISTIC_TYPES and status == "active":
+                result.append((type_id, item.get("default") is True))
+    return result
 
 
 def resolve_shipping_capabilities(
     user_preferences: Mapping[str, Any],
     category_preferences: Mapping[str, Any],
 ) -> ShippingCapabilities:
-    """Resolve the seller/category Mercado Envíos contract without guessing ME1/ME2.
+    """Identify seller ME2 default and independently determine Flex availability.
 
-    Mercado Libre publishes both account capabilities and category capabilities. The
-    base logistics type must be an active ME2 default for the seller and valid for the
-    category. Flex remains a separate optional decision when ``self_service`` is active.
+    Category logistics describe category-level advertised modes. They are not an
+    exhaustive denylist for seller-managed ME2 logistics: in particular a seller
+    may have cross_docking as its default while a category advertises only
+    self_service. Mercado Libre remains authoritative during item preflight.
     """
-
     modes = user_preferences.get("modes")
-    if not isinstance(modes, list) or ME2_MODE not in {str(mode) for mode in modes}:
+    if not isinstance(modes, list) or ME2_MODE not in modes:
         raise ShippingCapabilityError("La cuenta no tiene Mercado Envíos habilitado.")
 
-    category_types = _category_me2_types(category_preferences)
     user_types = _active_user_me2_types(user_preferences)
-    allowed = [
-        (type_id, is_default)
-        for type_id, is_default in user_types
-        if type_id in category_types and type_id in ME2_LOGISTIC_TYPES
-    ]
-
     base = next(
-        (
-            type_id
-            for type_id, is_default in allowed
-            if is_default and type_id != FLEX_LOGISTIC_TYPE
-        ),
+        (type_id for type_id, is_default in user_types
+         if is_default and type_id != FLEX_LOGISTIC_TYPE),
         None,
     )
     if base is None:
+        # No invented preference: we cannot infer which non-Flex type is base.
         raise ShippingCapabilityError(
-            "Mercado Envíos está activo, pero Mercado Libre no informó una logística base ME2 válida para esta categoría."
+            "Mercado Envíos: la cuenta no informó una modalidad base ME2 activa y predeterminada."
         )
 
-    flex_available = any(type_id == FLEX_LOGISTIC_TYPE for type_id, _ in allowed)
+    category_types = _category_me2_types(category_preferences)
+    flex_available = (
+        FLEX_LOGISTIC_TYPE in category_types
+        and any(type_id == FLEX_LOGISTIC_TYPE for type_id, _ in user_types)
+    )
     return ShippingCapabilities(
         mode=ME2_MODE,
         base_logistic_type=base,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy.orm import Session
@@ -21,7 +22,6 @@ from app.integrations.mercadolibre.product_identifiers import (
     value_matches_allowed_option,
 )
 from app.persistence import DraftBatch, ProductVersion, PublicationDraft
-from app.products.image_policy import ImagePolicyError, validate_stored_image
 from app.publication.commercial import listing_type_for_intent
 from app.publication.quantity_pricing import normalize_b2b_quantity_prices
 
@@ -35,6 +35,28 @@ class DraftValidationContext:
     metadata: Any
     shared_errors: tuple[dict, ...]
     shared_warnings: tuple[dict, ...]
+
+
+
+def validate_image_references(images: list[Any]) -> list[dict]:
+    """Check stored upload availability without reopening/decoding accepted image content.
+
+    Upload endpoints already enforce image format, integrity and dimensions.
+    Marketplace preflight remains authoritative for publication requirements.
+    """
+    errors: list[dict] = []
+    for image in images:
+        try:
+            path = Path(image.storage_path)
+            if not path.is_file() or path.stat().st_size == 0:
+                raise OSError("Archivo inexistente, vacío o no regular")
+        except (OSError, ValueError, TypeError) as exc:
+            errors.append({
+                "code": "INVALID_IMAGE",
+                "field": "images",
+                "message": f"{image.original_name}: no se puede acceder a la imagen almacenada ({exc}).",
+            })
+    return errors
 
 
 def build_validation_context(db: Session, batch: DraftBatch) -> DraftValidationContext:
@@ -62,15 +84,7 @@ def build_validation_context(db: Session, batch: DraftBatch) -> DraftValidationC
     if not version.images:
         errors.append({"code": "NO_IMAGES", "field": "images", "message": "At least one image is required."})
     else:
-        for image in version.images:
-            try:
-                validate_stored_image(image.storage_path)
-            except (ImagePolicyError, OSError) as exc:
-                errors.append({
-                    "code": "INVALID_IMAGE",
-                    "field": "images",
-                    "message": f"{image.original_name}: {exc}",
-                })
+        errors.extend(validate_image_references(version.images))
 
     if not (version.description or "").strip():
         errors.append({

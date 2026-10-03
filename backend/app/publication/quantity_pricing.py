@@ -145,9 +145,10 @@ def b2b_percentage_payload(
 ) -> dict:
     """Build the 2026 Mercado Libre percentage-based B2B PxQ payload safely.
 
-    The configured economic price remains authoritative. Mercado Libre's recommendation
-    is a maximum unit amount: if ML requires a deeper discount than our calculated price,
-    synchronization is rejected instead of silently destroying the configured margin.
+    The seller's configured amount is authoritative. Recommendations provide quantity
+    metadata only; the external API is responsible for enforcing its own constraints.
+    The percentage is rounded upward to two decimals, so the resulting price may be
+    slightly lower than the requested amount where the ratio is not exact.
     """
 
     base = _money(standard_amount)
@@ -172,24 +173,9 @@ def b2b_percentage_payload(
                 f"Mercado Libre marcó como incoherente el rango desde {quantity} unidades."
             )
 
-        recommended_amount = _money(recommendation.get("amount"))
-        if recommended_amount <= 0:
-            raise QuantityPricingSyncError(
-                f"Mercado Libre devolvió una recomendación inválida para {quantity} unidades."
-            )
-        if amount > recommended_amount:
-            raise QuantityPricingSyncError(
-                "El precio mayorista configurado para "
-                f"{quantity} unidades ({amount}) es superior al máximo recomendado por "
-                f"Mercado Libre ({recommended_amount}). No se aplica un descuento más profundo "
-                "automáticamente para proteger el margen configurado."
-            )
-
+        # Recommendations are advisory: never replace or reject the seller's price
+        # because it is above the recommended amount/discount.
         percentage = _discount_percentage(standard_amount=base, tier_amount=amount)
-        recommendation_discount = recommendation.get("discount") or {}
-        recommended_percentage = _percentage(recommendation_discount.get("percentage", 0))
-        if percentage < recommended_percentage:
-            percentage = recommended_percentage.quantize(PERCENTAGE_QUANT, rounding=ROUND_CEILING)
         if percentage <= previous_percentage:
             raise QuantityPricingSyncError(
                 "Los descuentos porcentuales B2B deben aumentar junto con la cantidad mínima."

@@ -520,3 +520,31 @@ table button{min-height:38px;padding:0 12px}
   .publisherStartChoices, .publisherMlaImport { grid-template-columns: 1fr; }
   .publisherMlaImport .importSourceOk { grid-column: auto; }
 }
+
+/* Alertas operativas flotantes: no desplazan el contenido principal. */
+.toastViewport{position:fixed;top:18px;right:18px;width:min(420px,calc(100vw - 32px));z-index:10000;display:flex;flex-direction:column;gap:10px;pointer-events:none}
+.toastNotice{display:flex;align-items:flex-start;gap:12px;pointer-events:auto;background:#fff;border:1px solid #dce4ef;border-left:4px solid #57769f;border-radius:12px;padding:13px 12px;box-shadow:0 12px 36px rgba(13,27,58,.18);overflow-wrap:anywhere}
+.toast-success{border-left-color:#258354}.toast-warning{border-left-color:#b77918}.toast-error{border-left-color:#bc3434}
+.toastSymbol{display:grid;place-items:center;flex:0 0 24px;height:24px;border-radius:50%;font-weight:800;background:#e8eff8;color:#355b91}
+.toast-success .toastSymbol{background:#e5f5eb;color:#1f7448}.toast-warning .toastSymbol{background:#fff1d1;color:#895700}.toast-error .toastSymbol{background:#ffeded;color:#a42a2a}
+.toastBody{flex:1;min-width:0}.toastBody strong{font-size:13px}.toastBody p{margin:4px 0 0;line-height:1.4;font-size:13px;color:#48536a}
+button.toastClose{min-height:28px;width:28px;flex:0 0 28px;border:0;border-radius:6px;padding:0;background:transparent;color:#5c6779;font-size:23px;font-weight:400}
+button.toastClose:hover:not(:disabled){background:#eef1f6;transform:none}
+@media(max-width:600px){.toastViewport{top:10px;right:10px;width:calc(100vw - 20px)}}
+
+/* Navegación incremental. Ocultar no desmonta los controles ni borra su estado. */
+.sideSteps .wizardStep{display:flex;align-items:center;gap:10px;padding:10px;border-radius:9px;color:#aebbd7;font-size:13px;font-weight:700;background:transparent;text-align:left;min-height:43px;width:100%;border:1px solid transparent}
+.sideSteps .wizardStep span{display:grid;place-items:center;width:23px;height:23px;flex-shrink:0;border:1px solid #3a4a6b;border-radius:7px;font-size:11px}
+.sideSteps .wizardStep:hover,.sideSteps .wizardStep:focus-visible{background:#22355f;color:#fff}
+.sideSteps .wizardStep.active{background:#233e73;color:white;border-color:#536fa4}
+.sideSteps .wizardStep.done:not(.active){color:#d3e1fa}
+.sideSteps .wizardStep.done:not(.active) span{background:#35558c;border-color:#35558c}
+.wizardNavigation{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 18px;background:white;border:1px solid #e1e6ef;border-radius:14px;margin-bottom:18px}
+.wizardNavigationHeading{display:grid;gap:4px}
+.wizardNavigationHeading strong{font-size:16px;color:#213759}
+.wizardNavigationHeading span{color:#68758a;font-size:12px}
+.wizardNavigationActions{display:flex;gap:8px;flex-shrink:0}
+.wizardNavigationActions button{min-height:38px}
+.wizardPricingMainPrice{max-width:400px;margin-bottom:16px}
+.wizardEmpty{color:#68758a;font-size:13px}
+@media(max-width:900px){.wizardNavigation{align-items:stretch;flex-direction:column}.wizardNavigationActions{justify-content:space-between}.sideSteps{gap:3px}.sideSteps .wizardStep{font-size:12px}}

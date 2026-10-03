@@ -113,23 +113,16 @@ def test_b2b_percentage_payload_reuses_ids_and_preserves_margin_safe_amounts():
     assert payload["price_per_quantity"][1]["conditions"]["eligible"] is True
 
 
-def test_b2b_percentage_payload_refuses_marketplace_discount_that_would_erode_margin():
-    with pytest.raises(QuantityPricingSyncError, match="proteger el margen"):
-        b2b_percentage_payload(
-            {},
-            [{"min_purchase_unit": 2, "amount": Decimal("950")}],
-            {
-                "recommendations": [
-                    {
-                        "quantity": 2,
-                        "amount": 900,
-                        "is_incoherent_quantity": False,
-                        "discount": {"percentage": 10},
-                    }
-                ]
-            },
-            standard_amount=Decimal("1000"),
-        )
+def test_b2b_percentage_payload_keeps_seller_discount_despite_stricter_recommendation():
+    result = b2b_percentage_payload(
+        {},
+        [{"min_purchase_unit": 2, "amount": Decimal("950")}],
+        {"recommendations": [{"quantity": 2, "amount": 900,
+                              "is_incoherent_quantity": False,
+                              "discount": {"percentage": 10}}]},
+        standard_amount=Decimal("1000"),
+    )
+    assert result["price_per_quantity"][0]["percentage"] == 5.0
 
 
 def test_pricing_separates_base_commission_financing_and_fixed_fee():

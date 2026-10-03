@@ -119,3 +119,49 @@ def test_payload_rejects_incompatible_me1_default_contract_in_publication_flow()
 
     with pytest.raises(ShippingCapabilityError, match="Mercado Envíos"):
         build_item_payload(version, draft, [], seller_sku="SKU-1")
+
+
+def test_seller_default_cross_docking_when_category_only_advertises_flex():
+    """Regression: real account/category pattern previously failed with 422."""
+    user = {
+        "modes": ["custom", "me2", "not_specified"],
+        "logistics": [{"mode": "me2", "types": [
+            {"type": "cross_docking", "status": "active", "default": True},
+            {"type": "fulfillment", "status": "active", "default": False},
+            {"type": "self_service", "status": "active", "default": False},
+        ]}],
+    }
+    category = {"logistics": [
+        {"types": ["custom"], "mode": "custom"},
+        {"types": ["not_specified"], "mode": "not_specified"},
+        {"types": ["default"], "mode": "me1"},
+        {"types": ["self_service"], "mode": "me2"},
+    ]}
+    resolved = resolve_shipping_capabilities(user, category)
+    assert resolved.mode == "me2"
+    assert resolved.base_logistic_type == "cross_docking"
+    assert resolved.flex_available is True
+
+
+def test_category_multiple_me2_entries_are_aggregated():
+    category = {"logistics": [
+        {"mode": "me2", "types": ["drop_off"]},
+        {"mode": "me2", "types": ["self_service"]},
+    ]}
+    result = resolve_shipping_capabilities(_user_preferences(), category)
+    assert result.base_logistic_type == "drop_off"
+    assert result.flex_available is True
+
+
+def test_inactive_seller_logistics_cannot_be_selected():
+    user = _user_preferences()
+    user["logistics"][0]["types"][0]["status"] = "inactive"
+    with pytest.raises(ShippingCapabilityError, match="predeterminada"):
+        resolve_shipping_capabilities(user, _category_preferences())
+
+
+def test_flex_is_not_enabled_when_category_does_not_advertise_it():
+    category = {"logistics": [{"mode": "me2", "types": ["drop_off"]}]}
+    result = resolve_shipping_capabilities(_user_preferences(), category)
+    assert result.base_logistic_type == "drop_off"
+    assert result.flex_available is False
