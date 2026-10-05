@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 from typing import Any
+import uuid
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.audit.service import audit
 from app.persistence import ProductMaster, ProductVersion
+from fastapi import HTTPException
 from app.technical_attributes.service import upsert_product_attributes
 
 
@@ -57,29 +59,34 @@ def serialize_version(version: ProductVersion) -> dict[str, Any]:
     }
 
 
-def save_product_version(db: Session, payload: Any) -> tuple[ProductMaster, ProductVersion, bool]:
+def save_product_version(db: Session, payload: Any, *, actor_user_id: uuid.UUID,
+                         authorization: Any = None, expected_version: int | None = None) -> tuple[ProductMaster, ProductVersion, bool]:
     sku = payload.internal_sku.strip()
-    master = db.scalar(select(ProductMaster).where(ProductMaster.internal_sku == sku))
+    master = db.scalar(select(ProductMaster).where(ProductMaster.internal_sku == sku).with_for_update())
     created_master = master is None
 
     if master is None:
         master = ProductMaster(
             internal_sku=sku,
             internal_name=payload.internal_name,
+            created_by_user_id=actor_user_id,
         )
         db.add(master)
         db.flush()
         version_number = 1
     else:
+        if authorization is None:
+            raise HTTPException(status_code=428, detail="Se requiere bloqueo vigente para una ficha existente")
+        authorization(master.id)
+        if expected_version is None:
+            raise HTTPException(status_code=428, detail="Se requiere la versión esperada de la ficha")
+        latest_version = db.scalar(select(func.max(ProductVersion.version_number)).where(
+            ProductVersion.product_master_id == master.id
+        )) or 0
+        if latest_version != expected_version:
+            raise HTTPException(status_code=409, detail="La ficha fue modificada; actualizá los datos antes de guardar")
         master.internal_name = payload.internal_name
-        version_number = (
-            db.scalar(
-                select(func.max(ProductVersion.version_number)).where(
-                    ProductVersion.product_master_id == master.id
-                )
-            )
-            or 0
-        ) + 1
+        version_number = latest_version + 1
 
     version = ProductVersion(
         product_master_id=master.id,

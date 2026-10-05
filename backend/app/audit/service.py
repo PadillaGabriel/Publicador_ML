@@ -9,6 +9,8 @@ def audit(
     entity_type: str,
     entity_id: str,
     payload: dict | None = None,
+    *,
+    actor_user_id=None,
 ) -> None:
     db.add(
         AuditEvent(
@@ -16,5 +18,6 @@ def audit(
             entity_type=entity_type,
             entity_id=entity_id,
             payload=payload or {},
+            actor_user_id=actor_user_id,
         )
     )

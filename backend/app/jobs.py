@@ -2,10 +2,12 @@ import asyncio
 import json
 import uuid
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
+from app.audit.service import audit
+from app.operator_auth import request_identity
 from app.core.db import SessionLocal
 from app.core.enums import JobItemStatus, JobStatus
 from app.core.time import utcnow
@@ -199,8 +201,9 @@ def get_job(job_id: uuid.UUID):
 
 
 @router.post("/{job_id}/cancel")
-def cancel_job(job_id: uuid.UUID):
+def cancel_job(job_id: uuid.UUID, request: Request):
     with SessionLocal() as db:
+        actor, _ = request_identity(db, request)
         job = db.get(Job, job_id)
         if not job:
             raise HTTPException(status_code=404, detail="Job not found.")
@@ -212,6 +215,7 @@ def cancel_job(job_id: uuid.UUID):
                 item.status = JobItemStatus.CANCELLED
         job.status = JobStatus.CANCELLED
         job.finished_at = utcnow()
+        audit(db, "PUBLICATION_JOB_CANCELLED", "Job", str(job.id), actor_user_id=actor.id)
         db.commit()
         return job_dict(db, job)
 

@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
 from app.core.db import get_db
+from app.operator_auth import request_identity
+from app.product_edit_leases import visible_product
+from app.operator_account_scope import ensure_account
 from app.persistence import MercadoLibreAccount, ProductMaster
 from app.technical_attributes.schemas import (
     ImportMlaRequest,
@@ -64,10 +67,13 @@ def preview_mla_reuse(
 )
 def reusable_attributes(
     product_id: uuid.UUID,
+    request: Request,
     account_id: uuid.UUID = Query(...),
     category_id: str = Query(min_length=1, max_length=40),
     db: Session = Depends(get_db),
 ):
-    product = _product(db, product_id)
+    actor, _ = request_identity(db, request)
+    product = visible_product(db, actor, product_id)
+    ensure_account(db, actor, account_id)
     account = _account(db, account_id)
     return resolve_reuse(db, product=product, account=account, category_id=category_id)

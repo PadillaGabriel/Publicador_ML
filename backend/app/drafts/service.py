@@ -53,6 +53,7 @@ def generate_drafts(
     account_id: uuid.UUID,
     count: int,
     commercial_distribution: list[dict] | None = None,
+    actor_user_id: uuid.UUID | None = None,
 ) -> DraftBatch:
     started = time.perf_counter()
     if count < 1 or count > 100:
@@ -237,6 +238,7 @@ def generate_drafts(
             "product_version_id": str(version.id),
             "commercial_distribution": normalized_distribution,
         },
+        actor_user_id=actor_user_id,
     )
     db.commit()
     db.refresh(batch)
@@ -254,6 +256,9 @@ def rebase_batch_product_version(
     db: Session,
     *,
     batch_id: uuid.UUID,
+    expected_product_version_id: uuid.UUID,
+    authorization,
+    actor_user_id: uuid.UUID,
     description: str,
     price: float,
     quantity: int,
@@ -267,9 +272,23 @@ def rebase_batch_product_version(
     exists only for pre-publication corrections discovered by validation (for example,
     required measurements/units). It never mutates an existing ProductVersion.
     """
-    batch = db.get(DraftBatch, batch_id)
+    batch = db.scalar(select(DraftBatch).where(DraftBatch.id == batch_id).with_for_update())
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found.")
+
+    # The callback locks ProductMaster and validates ownership/session/fencing token.
+    # The master row stays locked through the commit below.
+    current = db.get(ProductVersion, batch.product_version_id)
+    if current is None:
+        raise HTTPException(status_code=409, detail="Product version for batch not found.")
+    authorization(current.product_master_id)
+    if current.id != expected_product_version_id:
+        raise HTTPException(status_code=409, detail="El lote cambió de versión; volvé a cargarlo")
+    latest = db.scalar(select(func.max(ProductVersion.version_number)).where(
+        ProductVersion.product_master_id == current.product_master_id
+    )) or 0
+    if latest != current.version_number:
+        raise HTTPException(status_code=409, detail="La ficha cambió desde que se generó el lote; revisá la versión vigente")
 
     drafts = list(batch.drafts)
     draft_ids = [draft.id for draft in drafts]
@@ -295,18 +314,7 @@ def rebase_batch_product_version(
                 ),
             )
 
-    current = db.get(ProductVersion, batch.product_version_id)
-    if not current:
-        raise HTTPException(status_code=409, detail="Product version for batch not found.")
-
-    next_version_number = (
-        db.scalar(
-            select(func.max(ProductVersion.version_number)).where(
-                ProductVersion.product_master_id == current.product_master_id
-            )
-        )
-        or 0
-    ) + 1
+    next_version_number = latest + 1
 
     corrected = ProductVersion(
         product_master_id=current.product_master_id,
@@ -376,6 +384,7 @@ def rebase_batch_product_version(
             "reset_drafts": reset_count,
             "reason": "PREPUBLICATION_VALIDATION_CORRECTION",
         },
+        actor_user_id=actor_user_id,
     )
     db.commit()
     db.refresh(corrected)

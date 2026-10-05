@@ -3,8 +3,10 @@ from __future__ import annotations
 import atexit
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from concurrent.futures import as_completed
 from threading import Lock
 
+from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from app.accounts.service import load_access_token
@@ -81,17 +83,50 @@ def build_preflight_context(db: Session, batch: DraftBatch) -> PublicationPrefli
     )
 
 
+def upload_preflight_pictures(context: PublicationPreflightContext, drafts: list[PublicationDraft]) -> dict[str, str]:
+    """Upload each referenced private image once; use ML picture IDs, never /uploads URLs.
+
+    This does not create an item and does not make the local image publicly accessible.
+    Picture IDs are temporary for validation; publication has its own upload mechanism.
+    """
+    images = {str(image.id): image for image in context.version.images}
+    image_ids = {str(image_id) for draft in drafts for image_id in draft.image_order}
+    missing = image_ids - images.keys()
+    if missing:
+        raise HTTPException(status_code=422, detail="El lote referencia imágenes que ya no pertenecen a la ficha.")
+    if not image_ids:
+        return {}
+
+    client = MercadoLibreClient(context.access_token)
+    max_workers = max(1, min(4, len(image_ids)))
+    picture_ids: dict[str, str] = {}
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="ml-preflight-picture") as executor:
+        future_ids = {
+            executor.submit(client.upload_item_picture, images[image_id].storage_path, images[image_id].mime_type): image_id
+            for image_id in image_ids
+        }
+        for future in as_completed(future_ids):
+            image_id = future_ids[future]
+            picture_ids[image_id] = str(future.result()["id"])
+    return picture_ids
+
+
+def ordered_preflight_pictures(draft: PublicationDraft, picture_ids: dict[str, str]) -> list[dict[str, str]]:
+    """Retain individual draft order while reusing uploads across all drafts in a batch."""
+    return [{"id": picture_ids[str(image_id)]} for image_id in draft.image_order]
+
+
 def build_preflight_payload(
     context: PublicationPreflightContext,
     draft: PublicationDraft,
-    image_urls: list[str],
+    pictures: list[str | dict],
 ) -> tuple[dict | None, list[dict]]:
     try:
         return (
             build_item_payload(
                 context.version,
                 draft,
-                image_urls,
+                pictures,
                 seller_sku=context.seller_sku,
             ),
             [],

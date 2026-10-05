@@ -4,7 +4,6 @@ import logging
 import time
 import uuid
 from dataclasses import dataclass
-from typing import Callable
 
 from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
@@ -12,11 +11,12 @@ from sqlalchemy.orm import Session
 from app.audit.service import audit
 from app.core.enums import DraftStatus
 from app.persistence import DraftBatch, PublicationDraft, ValidationResult
-from app.publication.payload import ordered_image_urls
 from app.publication.preflight import (
     build_preflight_context,
     build_preflight_payload,
     validate_preflight_payloads,
+    upload_preflight_pictures,
+    ordered_preflight_pictures,
 )
 from app.publication.validation import build_validation_context, validate_draft_with_context
 
@@ -56,7 +56,6 @@ def validate_batch_drafts(
     db: Session,
     *,
     batch: DraftBatch,
-    image_url_for: Callable[[str], str],
 ) -> list[DraftValidationOutcome]:
     """Validate a batch while sharing product/category work across all drafts."""
 
@@ -87,19 +86,16 @@ def validate_batch_drafts(
     provider_ms = 0
     if provider_candidates:
         preflight_context = build_preflight_context(db, batch)
+        picture_ids = upload_preflight_pictures(preflight_context, [outcome.draft for outcome in provider_candidates])
         payloads: dict[uuid.UUID, dict] = {}
         by_id = {outcome.draft.id: outcome for outcome in provider_candidates}
 
         for outcome in provider_candidates:
-            image_urls = ordered_image_urls(
-                local_context.version,
-                outcome.draft,
-                image_url_for,
-            )
+            pictures = ordered_preflight_pictures(outcome.draft, picture_ids)
             payload, payload_errors = build_preflight_payload(
                 preflight_context,
                 outcome.draft,
-                image_urls,
+                pictures,
             )
             if payload_errors:
                 outcome.errors.extend(payload_errors)
@@ -130,7 +126,6 @@ def validate_single_draft(
     db: Session,
     *,
     draft: PublicationDraft,
-    image_url_for: Callable[[str], str],
 ) -> DraftValidationOutcome:
     batch = db.get(DraftBatch, draft.batch_id)
     if batch is None:
@@ -142,8 +137,9 @@ def validate_single_draft(
 
     if outcome.valid:
         preflight_context = build_preflight_context(db, batch)
-        image_urls = ordered_image_urls(local_context.version, draft, image_url_for)
-        payload, payload_errors = build_preflight_payload(preflight_context, draft, image_urls)
+        picture_ids = upload_preflight_pictures(preflight_context, [draft])
+        pictures = ordered_preflight_pictures(draft, picture_ids)
+        payload, payload_errors = build_preflight_payload(preflight_context, draft, pictures)
         outcome.errors.extend(payload_errors)
         if not outcome.errors and payload is not None:
             outcome.errors.extend(validate_preflight_payloads(
@@ -155,7 +151,7 @@ def validate_single_draft(
     return outcome
 
 
-def approve_ready_drafts(db: Session, *, batch_id: uuid.UUID) -> list[PublicationDraft]:
+def approve_ready_drafts(db: Session, *, batch_id: uuid.UUID, actor_user_id: uuid.UUID | None = None) -> list[PublicationDraft]:
     """Approve all READY drafts in one transaction instead of one HTTP commit each."""
 
     drafts = db.scalars(
@@ -168,5 +164,5 @@ def approve_ready_drafts(db: Session, *, batch_id: uuid.UUID) -> list[Publicatio
     ).all()
     for draft in drafts:
         draft.status = DraftStatus.APPROVED
-        audit(db, "DRAFT_APPROVED", "PublicationDraft", str(draft.id))
+        audit(db, "DRAFT_APPROVED", "PublicationDraft", str(draft.id), actor_user_id=actor_user_id)
     return drafts

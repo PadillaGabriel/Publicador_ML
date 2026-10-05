@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy import select
@@ -19,6 +19,8 @@ from app.integrations.mercadolibre.client import (
     MercadoLibreOAuthClient,
 )
 from app.persistence import MercadoLibreAccount
+from app.operator_auth import request_identity
+from app.identity import OperatorAccountGrant
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -45,8 +47,14 @@ class AccountOut(BaseModel):
 
 
 @router.get("", response_model=list[AccountOut])
-def list_accounts(db: Session = Depends(get_db)):
-    return db.scalars(select(MercadoLibreAccount).order_by(MercadoLibreAccount.created_at)).all()
+def list_accounts(request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
+    query = select(MercadoLibreAccount)
+    if actor.role == "OPERATOR":
+        query = query.join(
+            OperatorAccountGrant, OperatorAccountGrant.account_id == MercadoLibreAccount.id
+        ).where(OperatorAccountGrant.user_id == actor.id)
+    return db.scalars(query.order_by(MercadoLibreAccount.created_at)).all()
 
 
 @router.get("/oauth/status")

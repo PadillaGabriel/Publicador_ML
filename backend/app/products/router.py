@@ -3,7 +3,7 @@ import mimetypes
 import time
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Header, HTTPException, Query, Request, UploadFile
 from sqlalchemy import and_, func, select
 from sqlalchemy.orm import Session
 
@@ -19,6 +19,8 @@ from app.products.image_upload import (
     stage_product_image,
 )
 from app.products.schemas import ProductCreate
+from app.operator_auth import request_identity
+from app.product_edit_leases import require_edit_token, visible_product
 from app.products.service import find_product_by_sku, save_product_version, serialize_version
 
 router = APIRouter(prefix="/api/products", tags=["products"])
@@ -26,7 +28,7 @@ logger = logging.getLogger("product-image-performance")
 
 
 @router.get("")
-def list_products(db: Session = Depends(get_db)):
+def list_products(request: Request, db: Session = Depends(get_db)):
     latest_numbers = (
         select(
             ProductVersion.product_master_id.label("product_master_id"),
@@ -35,7 +37,8 @@ def list_products(db: Session = Depends(get_db)):
         .group_by(ProductVersion.product_master_id)
         .subquery()
     )
-    rows = db.execute(
+    actor, _ = request_identity(db, request)
+    query = (
         select(ProductMaster, ProductVersion)
         .outerjoin(
             latest_numbers,
@@ -49,7 +52,10 @@ def list_products(db: Session = Depends(get_db)):
             ),
         )
         .order_by(ProductMaster.created_at.desc())
-    ).all()
+    )
+    if actor.role == "OPERATOR":
+        query = query.where(ProductMaster.created_by_user_id == actor.id)
+    rows = db.execute(query).all()
     return [
         {
             "id": master.id,
@@ -64,12 +70,15 @@ def list_products(db: Session = Depends(get_db)):
 
 @router.get("/lookup")
 def lookup_product(
+    request: Request,
     sku: str = Query(min_length=1, max_length=120),
     db: Session = Depends(get_db),
 ):
     master, version = find_product_by_sku(db, sku)
     if master is None or version is None:
         return {"found": False}
+    actor, _ = request_identity(db, request)
+    visible_product(db, actor, master.id)
 
     return {
         "found": True,
@@ -83,8 +92,15 @@ def lookup_product(
 
 
 @router.post("")
-def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
-    master, version, created_master = save_product_version(db, payload)
+def create_product(payload: ProductCreate, request: Request, db: Session = Depends(get_db),
+                   x_product_lease_token: str | None = Header(default=None),
+                   x_expected_version: int | None = Header(default=None)):
+    actor, session = request_identity(db, request)
+    master, version, created_master = save_product_version(
+        db, payload, actor_user_id=actor.id,
+        authorization=lambda product_id: require_edit_token(db, actor, session, product_id, x_product_lease_token),
+        expected_version=x_expected_version,
+    )
     return {
         "product_id": master.id,
         "version_id": version.id,
@@ -94,7 +110,9 @@ def create_product(payload: ProductCreate, db: Session = Depends(get_db)):
 
 
 @router.post("/{product_id}/versions")
-def create_version(product_id: uuid.UUID, payload: ProductCreate, db: Session = Depends(get_db)):
+def create_version(product_id: uuid.UUID, payload: ProductCreate, request: Request, db: Session = Depends(get_db),
+                   x_product_lease_token: str | None = Header(default=None),
+                   x_expected_version: int | None = Header(default=None)):
     master = db.get(ProductMaster, product_id)
     if not master:
         raise HTTPException(status_code=404, detail="Product not found.")
@@ -104,7 +122,14 @@ def create_version(product_id: uuid.UUID, payload: ProductCreate, db: Session = 
             detail="El SKU de una nueva versión debe coincidir con el producto maestro.",
         )
 
-    _, version, _ = save_product_version(db, payload)
+    actor, session = request_identity(db, request)
+    if x_expected_version is None:
+        raise HTTPException(status_code=428, detail="Se requiere versión esperada")
+    require_edit_token(db, actor, session, product_id, x_product_lease_token)
+    _, version, _ = save_product_version(
+        db, payload, actor_user_id=actor.id, expected_version=x_expected_version,
+        authorization=lambda existing_id: require_edit_token(db, actor, session, existing_id, x_product_lease_token),
+    )
     return {
         "product_id": master.id,
         "version_id": version.id,
@@ -113,21 +138,28 @@ def create_version(product_id: uuid.UUID, payload: ProductCreate, db: Session = 
 
 
 @router.get("/versions/{version_id}")
-def get_version(version_id: uuid.UUID, db: Session = Depends(get_db)):
+def get_version(version_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
     version = db.get(ProductVersion, version_id)
     if not version:
         raise HTTPException(status_code=404, detail="Version not found.")
+    actor, _ = request_identity(db, request)
+    visible_product(db, actor, version.product_master_id)
     return serialize_version(version)
 
 
 @router.post("/versions/{version_id}/images/batch")
 def upload_images_batch(
     version_id: uuid.UUID,
+    request: Request,
     files: list[UploadFile] = File(...),
     db: Session = Depends(get_db),
+    x_product_lease_token: str | None = Header(default=None),
 ):
-    if db.get(ProductVersion, version_id) is None:
+    version = db.get(ProductVersion, version_id)
+    if version is None:
         raise HTTPException(status_code=404, detail="Version not found.")
+    actor, session = request_identity(db, request)
+    require_edit_token(db, actor, session, version.product_master_id, x_product_lease_token)
 
     settings = get_settings()
     started = time.perf_counter()
@@ -200,6 +232,7 @@ def upload_images_batch(
             db,
             version_id=version_id,
             staged_images=staged,
+            actor_user_id=actor.id,
         ) if staged else []
     except HTTPException:
         raise
@@ -238,11 +271,16 @@ def upload_images_batch(
 @router.post("/versions/{version_id}/images")
 def upload_image(
     version_id: uuid.UUID,
+    request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    x_product_lease_token: str | None = Header(default=None),
 ):
-    if db.get(ProductVersion, version_id) is None:
+    version = db.get(ProductVersion, version_id)
+    if version is None:
         raise HTTPException(status_code=404, detail="Version not found.")
+    actor, session = request_identity(db, request)
+    require_edit_token(db, actor, session, version.product_master_id, x_product_lease_token)
 
     settings = get_settings()
     content = file.file.read(settings.max_upload_bytes + 1)
@@ -262,6 +300,7 @@ def upload_image(
             mime_type=mime,
             content=content,
             upload_dir=settings.upload_dir,
+            actor_user_id=actor.id,
         )
     except ImagePolicyError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

@@ -30,13 +30,14 @@ def test_batch_validation_builds_shared_context_once_and_preflights_in_one_group
     monkeypatch.setattr(validation_service, "build_preflight_context", build_provider)
     monkeypatch.setattr(validation_service, "build_preflight_payload", build_payload)
     monkeypatch.setattr(validation_service, "validate_preflight_payloads", validate_payloads)
-    monkeypatch.setattr(validation_service, "ordered_image_urls", lambda *_args: ["https://image"])
+    upload_pictures = MagicMock(return_value={"image1": "ML-PIC-1"})
+    monkeypatch.setattr(validation_service, "upload_preflight_pictures", upload_pictures)
+    monkeypatch.setattr(validation_service, "ordered_preflight_pictures", lambda *_args: [{"id": "ML-PIC-1"}])
     monkeypatch.setattr(validation_service, "_persist_outcomes", MagicMock())
 
     outcomes = validation_service.validate_batch_drafts(
         db,
         batch=batch,
-        image_url_for=lambda image_id: f"https://images/{image_id}",
     )
 
     assert len(outcomes) == 3
@@ -44,6 +45,7 @@ def test_batch_validation_builds_shared_context_once_and_preflights_in_one_group
     build_provider.assert_called_once_with(db, batch)
     assert validate_local.call_count == 3
     validate_payloads.assert_called_once()
+    upload_pictures.assert_called_once()
     assert len(validate_payloads.call_args.args[1]) == 3
 
 

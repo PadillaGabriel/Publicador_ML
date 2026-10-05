@@ -71,6 +71,9 @@ export async function api<T>(
   });
 
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith("/api/operator-auth/")) {
+      window.dispatchEvent(new Event("publisher-session-expired"));
+    }
     const message = await parseErrorResponse(response);
     throw new Error(message);
   }

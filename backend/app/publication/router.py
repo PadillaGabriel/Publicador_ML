@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.accounts.service import load_access_token
 from app.audit.service import audit
 from app.core.db import get_db
+from app.operator_auth import request_identity
 from app.core.enums import DraftStatus, JobItemStatus, JobStatus
 from app.persistence import (
     DraftBatch,
@@ -216,7 +217,8 @@ def create_publication_job(payload: BatchAction, request: Request, db: Session =
     if not eligible:
         raise HTTPException(status_code=409, detail="All selected drafts are already published.")
 
-    job = Job(total=len(eligible), status=JobStatus.PENDING)
+    actor, _ = request_identity(db, request)
+    job = Job(total=len(eligible), status=JobStatus.PENDING, requested_by_user_id=actor.id)
     db.add(job)
     db.flush()
     for draft in eligible:
@@ -227,6 +229,7 @@ def create_publication_job(payload: BatchAction, request: Request, db: Session =
         "Job",
         str(job.id),
         {"count": len(eligible), "draft_ids": [str(d.id) for d in eligible]},
+        actor_user_id=actor.id,
     )
     db.commit()
     logger.info("publication_job_created job=%s drafts=%d", job.id, job.total)

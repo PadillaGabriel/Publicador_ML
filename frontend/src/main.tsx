@@ -8,6 +8,7 @@ import {TitleAssistant} from "./title-intelligence/TitleAssistant";
 import {applyReusableAttributes} from "./technical-attributes/reuse";
 import {buildImportedProductSeed} from "./technical-attributes/publication-import";
 import type {MlaPublicationSnapshot, ReuseTechnicalAttributesResult} from "./technical-attributes/types";
+import {OperatorUsers} from "./OperatorUsers";
 import "./styles.css";
 
 type Account = {
@@ -253,6 +254,54 @@ function App() {
   const [manualAccount, setManualAccount] = useState({nickname: "", token: ""});
   const [existingProduct, setExistingProduct] = useState<ExistingProduct | null>(null);
   const [productMasterId, setProductMasterId] = useState("");
+  const [editLease, setEditLease] = useState<{productId: string; token: string; expiresAt: string} | null>(null);
+  const editLeaseRef = useRef<{productId: string; token: string; expiresAt: string} | null>(null);
+  function rememberEditLease(next: {productId: string; token: string; expiresAt: string} | null) {
+    editLeaseRef.current = next;
+    setEditLease(next);
+  }
+  function releaseEditLease() {
+    const prior = editLeaseRef.current;
+    if (!prior) return;
+    rememberEditLease(null);
+    void api(`/api/product-edit-leases/${prior.productId}`, {
+      method: "DELETE", body: JSON.stringify({fencing_token: prior.token}),
+    }).catch(() => { /* The lease will expire server-side if connectivity is lost. */ });
+  }
+  async function takeEditLease(productId: string) {
+    const existing = editLeaseRef.current;
+    if (existing?.productId === productId && new Date(existing.expiresAt).getTime() > Date.now() + 15_000) {
+      return existing.token;
+    }
+    if (existing && existing.productId !== productId) releaseEditLease();
+    const response = await api<{fencing_token: string; expires_at: string}>(
+      `/api/product-edit-leases/${productId}`, {method: "POST"}
+    );
+    rememberEditLease({productId, token: response.fencing_token, expiresAt: response.expires_at});
+    return response.fencing_token;
+  }
+  useEffect(() => {
+    if (!editLease) return;
+    const timer = window.setInterval(async () => {
+      const current = editLeaseRef.current;
+      if (!current || current.productId !== editLease.productId || current.token !== editLease.token) return;
+      try {
+        const renewed = await api<{expires_at: string}>(`/api/product-edit-leases/${current.productId}`, {
+          method: "PUT", body: JSON.stringify({fencing_token: current.token}),
+        });
+        if (editLeaseRef.current?.token === current.token) {
+          rememberEditLease({...current, expiresAt: renewed.expires_at});
+        }
+      } catch {
+        if (editLeaseRef.current?.token === current.token) {
+          rememberEditLease(null);
+          notify("Se perdió el bloqueo de edición. Volvé a tomarlo antes de guardar.", "warning");
+        }
+      }
+    }, 50_000);
+    return () => window.clearInterval(timer);
+  }, [editLease?.productId, editLease?.token]);
+
   const [startMode, setStartMode] = useState<"" | "MLA_IMPORT" | "MANUAL">("");
   const [mlaImportId, setMlaImportId] = useState("");
   const [mlaPreview, setMlaPreview] = useState<MlaPublicationSnapshot | null>(null);
@@ -268,6 +317,12 @@ function App() {
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
   const [activeView, setActiveView] = useState<"publisher" | "pricing-settings" | "price-calculator">("publisher");
   const [publisherStep, setPublisherStep] = useState<"category" | "technical" | "prices" | "shipping" | "images" | "review" | "execution">("category");
+  const [lastAction, setLastAction] = useState("Todavía no hay acciones en esta ficha.");
+  const [lastSavedAt, setLastSavedAt] = useState("");
+  const [savedSignature, setSavedSignature] = useState("");
+  const [resumeJobId, setResumeJobId] = useState("");
+  const trackedJobRef = useRef<string | null>(null);
+
   const [pricingConfigured, setPricingConfigured] = useState(false);
   const [pricingProfile, setPricingProfile] = useState<PricingProfile>({
     name: "Mercado Libre", channel: "MERCADOLIBRE", currency_id: "ARS",
@@ -292,6 +347,28 @@ function App() {
     price: "0", quantity: "1", count: "6", localPickup: false, warrantyType: "SELLER",
     warrantyDuration: "30", warrantyUnit: "days"
   });
+
+  // Only persisted product fields count as unsaved changes. Transient API metadata is excluded.
+  const editSignature = JSON.stringify({
+    accountId, categoryId, form, attributes, quantityPricingEnabled, quantityPrices,
+    simulationPackage, productCost,
+  });
+  const dirty = Boolean(startMode && (versionId
+    ? editSignature !== savedSignature
+    : Boolean(form.sku.trim() || form.name.trim() || form.title.trim() || form.description.trim()
+      || form.brand.trim() || form.model.trim() || form.characteristics.trim()
+      || categoryId || Object.keys(attributes).length || uploadedImages.length || batchId
+      || quantityPricingEnabled || quantityPrices.length || productCost !== "0"
+      || form.price !== "0" || form.quantity !== "1")));
+  useEffect(() => {
+    const warnOnExit = (event: BeforeUnloadEvent) => {
+      if (!dirty) return;
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    window.addEventListener("beforeunload", warnOnExit);
+    return () => window.removeEventListener("beforeunload", warnOnExit);
+  }, [dirty]);
 
   useEffect(() => {
     attributesRef.current = attributes;
@@ -464,24 +541,28 @@ function App() {
       .catch(() => setPricingConfigured(false));
   }, []);
 
+  // Recovery is explicit: a stored job never attaches itself to a different product.
   useEffect(() => {
-    if (!accountId) return;
-    const storedJobId = window.localStorage.getItem(activeJobStorageKey(accountId));
-    if (!storedJobId) return;
-
-    let source: EventSource | null = null;
-    api<any>(`/api/jobs/${storedJobId}`)
-      .then(result => {
-        if (TERMINAL_JOB_STATES.includes(result.status)) {
-          window.localStorage.removeItem(activeJobStorageKey(accountId));
-          return;
-        }
-        setJob({...result, job_id:storedJobId});
-        source = watchJob(storedJobId);
-      })
-      .catch(() => window.localStorage.removeItem(activeJobStorageKey(accountId)));
-    return () => source?.close();
+    setResumeJobId(accountId ? window.localStorage.getItem(activeJobStorageKey(accountId)) || "" : "");
   }, [accountId]);
+
+  async function resumePreviousJob() {
+    if (!resumeJobId) return;
+    const result = await api<any>(`/api/jobs/${resumeJobId}`);
+    trackedJobRef.current = resumeJobId;
+    if (TERMINAL_JOB_STATES.includes(result.status)) {
+      window.localStorage.removeItem(activeJobStorageKey(accountId));
+      setResumeJobId("");
+      setJob({...result, job_id: resumeJobId});
+      setLastAction("Resultado del trabajo anterior consultado.");
+    } else {
+      setJob({...result, job_id: resumeJobId});
+      watchJob(resumeJobId);
+      setLastAction("Seguimiento del trabajo anterior reanudado.");
+    }
+    setActiveView("publisher");
+    setPublisherStep("execution");
+  }
 
   useEffect(() => {
     setCategoryId("");
@@ -772,8 +853,9 @@ function App() {
   }, [form.sku]);
 
 
-  function loadExistingProduct() {
+  async function loadExistingProduct() {
     if (!existingProduct) return;
+    await takeEditLease(existingProduct.id);
     const version = existingProduct.latest_version;
     const context = version.discovery_context || {};
     const savedBrand = context.brand || version.attributes?.BRAND?.value_name || version.attributes?.BRAND || "";
@@ -1185,10 +1267,26 @@ function App() {
         characteristics: form.characteristics.trim(),
       }
     };
-    const result = await api<any>("/api/products", {method:"POST", body:JSON.stringify(payload)});
+    const matched = existingProduct?.internal_sku === form.sku.trim() ? existingProduct : null;
+    const leaseToken = matched ? await takeEditLease(matched.id) : null;
+    const headers: Record<string, string> = {};
+    if (matched && leaseToken) {
+      headers["X-Product-Lease-Token"] = leaseToken;
+      headers["X-Expected-Version"] = String(matched.latest_version.version_number);
+    }
+    const result = await api<any>("/api/products", {method:"POST", headers, body:JSON.stringify(payload)});
+    // A new ficha also requires a lease for its subsequent image uploads.
+    if (result.created_master) await takeEditLease(String(result.product_id));
+    setExistingProduct(previous => previous && previous.id === result.product_id
+      ? {...previous, latest_version: {...previous.latest_version, version_number: result.version_number, id: result.version_id}}
+      : previous);
     setVersionId(result.version_id);
     setProductMasterId(String(result.product_id || ""));
     setUploadedImages([]);
+    setSavedSignature(editSignature);
+    setLastSavedAt(new Date().toLocaleString("es-AR"));
+    setLastAction("Ficha guardada. Podés cargar las imágenes.");
+    setPublisherStep("images");
     setMessage(
       result.created_master
         ? "Ficha maestra guardada. Ya podés cargar imágenes y definir el lote."
@@ -1209,8 +1307,16 @@ function App() {
       throw new Error("Esperá a que Mercado Libre confirme la configuración de Mercado Envíos antes de revalidar.");
     }
 
+    if (!versionId || !productMasterId) {
+      throw new Error("No se identificó la versión de ficha asociada al lote. Volvé a cargar la ficha.");
+    }
+    const correctionToken = await takeEditLease(productMasterId);
     const correction = await api<any>(`/api/drafts/batches/${batchId}/product-correction`, {
       method:"POST",
+      headers: {
+        "X-Product-Lease-Token": correctionToken,
+        "X-Expected-Product-Version": versionId,
+      },
       body:JSON.stringify({
         description: form.description,
         price: Number(form.price),
@@ -1222,7 +1328,13 @@ function App() {
     });
 
     setVersionId(correction.version_id);
+    setExistingProduct(previous => previous && previous.id === productMasterId
+      ? {...previous, latest_version: {...previous.latest_version, version_number: correction.version_number, id: correction.version_id}}
+      : previous);
     setUploadedImages((correction.images || []) as UploadedImage[]);
+    setSavedSignature(editSignature);
+    setLastSavedAt(new Date().toLocaleString("es-AR"));
+    setLastAction("Correcciones guardadas y lote revalidado.");
 
     const validation = await api<any>(`/api/drafts/batches/${batchId}/validate`, {method:"POST"});
     await loadBatch(batchId);
@@ -1247,6 +1359,7 @@ function App() {
 
   async function uploadImages(files: FileList | null) {
     if (!files || !versionId) return;
+    if (!productMasterId) throw new Error("No se identificó la ficha para subir imágenes");
 
     const pending = Array.from(files);
     const batchSize = 6;
@@ -1263,7 +1376,8 @@ function App() {
 
         const result = await api<any>(
           `/api/products/versions/${versionId}/images/batch`,
-          {method:"POST", body:fd}
+          {method:"POST", body:fd, headers: {"X-Product-Lease-Token":
+            await takeEditLease(productMasterId)}}
         );
         uploaded += Number(result.uploaded_count || 0);
         (result.failed || []).forEach((failure:any) => {
@@ -1279,6 +1393,10 @@ function App() {
       }
 
       setMessage(`${uploaded} imagen(es) cargadas y ${confirmed.length} confirmadas por el backend.`);
+      if (confirmed.length) {
+        setLastAction(`${confirmed.length} imágenes confirmadas. Siguiente: generar borradores.`);
+        setPublisherStep("images");
+      }
     } finally {
       setImageUploadBusy(false);
     }
@@ -1315,6 +1433,8 @@ function App() {
       });
       setBatchId(result.batch_id);
       await loadBatch(result.batch_id);
+      setLastAction(`${result.count} borradores generados. Siguiente: revisar y validar.`);
+      setPublisherStep("review");
       setMessage(`${result.count} borradores generados con condiciones comerciales confirmadas por Mercado Libre.`);
     } finally {
       setGenerationActive(false);
@@ -1368,11 +1488,19 @@ function App() {
     let pollingTimer: number | null = null;
 
     const applyJobState = (data: any) => {
+      // An earlier job must not write progress into a newly started publication.
+      if (trackedJobRef.current !== jobId) {
+        es.close();
+        if (pollingTimer !== null) window.clearInterval(pollingTimer);
+        return true;
+      }
       setJob({...data, job_id: jobId});
       if (TERMINAL_JOB_STATES.includes(data.status)) {
         es.close();
         if (pollingTimer !== null) window.clearInterval(pollingTimer);
         if (accountId) window.localStorage.removeItem(activeJobStorageKey(accountId));
+        setResumeJobId("");
+        setLastAction("Ejecución terminada. Revisá el resultado antes de crear una nueva publicación.");
         setSelectedDraftIds([]);
         loadBatch();
         return true;
@@ -1413,7 +1541,11 @@ function App() {
       body:JSON.stringify({batch_id: batchId, draft_ids: selectedApprovedDraftIds})
     });
     setJob(result);
+    trackedJobRef.current = result.job_id;
     if (accountId) window.localStorage.setItem(activeJobStorageKey(accountId), result.job_id);
+    setResumeJobId(result.job_id);
+    setLastAction("Publicación iniciada. Consultá el progreso y el resultado.");
+    setPublisherStep("execution");
     watchJob(result.job_id);
   }
 
@@ -1493,29 +1625,81 @@ function App() {
     }
   }
 
-  function startFromZero() {
-    setStartMode("MANUAL");
+  function resetPublicationState(nextAccountId = accountId) {
+    releaseEditLease();
+    // The persisted job reference remains available for explicit recovery.
+    setAccountId(nextAccountId);
+    setStartMode("");
     setMlaPreview(null);
     setMlaImportId("");
     setTechnicalReuse(null);
     setReusedAttributeIds(new Set());
     setProductMasterId("");
     setExistingProduct(null);
+    setDismissedExistingSku("");
     setCategoryId("");
     setSelectedCategoryName("");
     setCategorySuggestions([]);
+    setFields([]);
+    setRequirements([]);
+    setProductIdentifierContract(null);
+    setProductIdentifierMode("");
     setAttributes({});
-    setForm(current => ({
-      ...current,
-      sku: "",
-      name: "",
-      title: "",
-      brand: "",
-      model: "",
-      characteristics: "",
-      description: "",
-    }));
+    setCustomAttributeFields({});
+    setShowSecondaryAttributes(false);
+    setTitleMaxLength(null);
+    setVersionId("");
+    setUploadedImages([]);
+    setBatchId("");
+    setDrafts([]);
+    setSelectedDraftIds([]);
+    setKeywordIntelligence(null);
+    setJob(null);
+    trackedJobRef.current = null;
+    setCommercialOptions([]);
+    setCommercialAllocations([]);
+    setPricingListingTypeId("");
+    setQuantityPricingEnabled(false);
+    setQuantityPrices([]);
+    setQuantityPricingAnalysis(null);
+    setPricingAnalysis(null);
+    setProductCost("0");
+    setSimulationPackage({dimensions:"", weight:"", logisticType:"", shippingMode:"", freeShipping:""});
+    setShippingCapabilities(null);
+    setShippingCapabilitiesError("");
+    setForm({sku:"", name:"", title:"", brand:"", model:"", characteristics:"", description:"",
+      price:"0", quantity:"1", count:"6", localPickup:false, warrantyType:"SELLER",
+      warrantyDuration:"30", warrantyUnit:"days"});
+    setSavedSignature("");
+    setLastSavedAt("");
+    setLastAction("Nueva ficha preparada. Elegí cómo comenzar.");
+    setPublisherStep("category");
+    setActiveView("publisher");
+  }
+
+  function confirmDiscard() {
+    if (!dirty && !versionId && !batchId && !job && !uploadedImages.length) return true;
+    return window.confirm(dirty
+      ? "Tenés cambios sin guardar. Si continuás, se descartarán los cambios locales; las fichas y publicaciones ya guardadas no se borrarán. ¿Continuar?"
+      : "Vas a salir del trabajo actual. Las fichas y publicaciones guardadas permanecerán intactas, pero se limpiará el contexto visible. ¿Continuar?");
+  }
+
+  function beginNewPublication() {
+    if (!confirmDiscard()) return;
+    resetPublicationState();
+    notify("Nueva publicación preparada. Los datos del trabajo anterior no se copiaron.", "success");
+  }
+
+  function startFromZero() {
+    if (!confirmDiscard()) return;
+    resetPublicationState();
+    setStartMode("MANUAL");
     setMessage("Carga manual iniciada. Completá los datos del producto y buscá su categoría.");
+  }
+
+  function switchAccount(nextAccountId: string) {
+    if (nextAccountId === accountId || !confirmDiscard()) return;
+    resetPublicationState(nextAccountId);
   }
 
   async function run<T>(fn: () => Promise<T>) {
@@ -1673,12 +1857,14 @@ function App() {
       <aside>
         <div className="brand">Publicador ML</div>
         <div className="muted">Gestión masiva de publicaciones</div>
-        <div className="viewSwitch pricingViewSwitch">
-          <button className={activeView === "publisher" ? "active" : ""} onClick={()=>setActiveView("publisher")}>Publicador</button>
-          <button className={activeView === "pricing-settings" ? "active" : ""} onClick={()=>setActiveView("pricing-settings")}>Configuración</button>
-          <button className={activeView === "price-calculator" ? "active" : ""} onClick={()=>setActiveView("price-calculator")}>Calculadora</button>
-        </div>
-        <nav className="sideSteps" aria-label="Etapas del publicador">
+        <nav className="primaryNav" aria-label="Navegación principal">
+          <button type="button" className={activeView === "publisher" ? "active" : ""} onClick={()=>setActiveView("publisher")}>Publicador</button>
+          <button type="button" className={activeView === "pricing-settings" ? "active" : ""} onClick={()=>setActiveView("pricing-settings")}>Configuración</button>
+          <button type="button" className={activeView === "price-calculator" ? "active" : ""} onClick={()=>setActiveView("price-calculator")}>Calculadora</button>
+          <button type="button" className="newPublicationAction" onClick={beginNewPublication}>+ Nueva publicación</button>
+        </nav>
+        {activeView === "publisher" && <div className="sideSectionLabel">ETAPAS DE LA FICHA</div>}
+        {activeView === "publisher" && <nav className="sideSteps" aria-label="Etapas del publicador">
           {([
             ["category", "Producto y categoría", contextComplete],
             ["technical", "Ficha técnica", productComplete],
@@ -1696,7 +1882,7 @@ function App() {
               onClick={() => {setActiveView("publisher"); setPublisherStep(key);}}
             ><span>{index + 1}</span>{label}</button>
           )}
-        </nav>
+        </nav>}
         <div className="status">
           <span className="dot"/> Publicación real protegida por configuración
         </div>
@@ -1728,6 +1914,16 @@ function App() {
           <button className="secondary" onClick={() => setAccountModal(true)}>+ Conectar cuenta</button>
         </header>
 
+        <section className="workflowContext" aria-label="Estado de la publicación actual">
+          <div><span>Producto actual</span><strong>{form.sku.trim() || "Sin SKU"}</strong></div>
+          <div><span>Etapa actual</span><strong>{({category:"Producto y categoría", technical:"Ficha técnica", prices:"Precios", shipping:"Logística", images:"Imágenes y lote", review:"Revisión", execution:"Publicación"} as const)[publisherStep]}</strong></div>
+          <div><span>Última acción</span><strong>{lastAction}</strong></div>
+          <div><span>Último guardado</span><strong>{lastSavedAt || "Aún no guardada"}{dirty ? " · Cambios pendientes" : ""}</strong></div>
+        </section>
+        {resumeJobId && (!job || (job.job_id !== resumeJobId && job.id !== resumeJobId)) && <div className="resumeJobNotice">
+          <span>Hay un trabajo anterior registrado para esta cuenta. No se mezclará con la ficha actual.</span>
+          <button type="button" className="secondary" onClick={()=>run(resumePreviousJob)}>Consultar trabajo anterior</button>
+        </div>}
         <section className="summaryBar">
           <div><span>Cuenta</span><b>{selectedAccount?.nickname || "Sin seleccionar"}</b></div>
           <div><span>Categoría</span><b>{selectedCategoryName || "Sin seleccionar"}</b></div>
@@ -1759,14 +1955,7 @@ function App() {
           <div className="sectionTitle"><span>1</span> Producto y categoría</div>
           <div className="grid2">
             <label>Cuenta
-              <select value={accountId} onChange={e=>{
-                setAccountId(e.target.value);
-                setStartMode("");
-                setMlaPreview(null);
-                setMlaImportId("");
-                setCategoryId("");
-                setSelectedCategoryName("");
-              }}>
+              <select value={accountId} onChange={e=>switchAccount(e.target.value)}>
                 <option value="">Seleccionar…</option>
                 {accounts.map(a=><option key={a.id} value={a.id}>{a.nickname} {a.seller_id ? `· ${a.seller_id}`:""}</option>)}
               </select>
@@ -1827,7 +2016,7 @@ function App() {
             </div>
           </div>
           <div className="grid3">
-            <label>SKU<input disabled={!accountId} value={form.sku} onChange={e=>{setForm({...form,sku:e.target.value}); setDismissedExistingSku("");}}/>
+            <label>SKU<input disabled={!accountId} value={form.sku} onChange={e=>{if (editLeaseRef.current) releaseEditLease(); setForm({...form,sku:e.target.value}); setDismissedExistingSku("");}}/>
               {skuLookupBusy && <small className="helper">Buscando ficha guardada…</small>}
             </label>
             <label>Nombre del producto<input disabled={!accountId} value={form.name} onChange={e=>setForm({...form,name:e.target.value})}/></label>
@@ -1837,13 +2026,17 @@ function App() {
             <label>Características conocidas<input disabled={!accountId} value={form.characteristics} onChange={e=>setForm({...form,characteristics:e.target.value})}/></label>
           </div>
 
+          {editLease && <div className="existingSkuNotice" role="status">
+            Edición exclusiva activa. Se renueva mientras mantenés esta ficha abierta.
+            <button type="button" className="secondary" onClick={releaseEditLease}>Liberar edición</button>
+          </div>}
           {existingProduct && dismissedExistingSku !== form.sku.trim() && <div className="existingSkuNotice">
             <div>
               <b>Este SKU ya tiene una ficha guardada.</b>
               <span>Última versión: {existingProduct.latest_version.version_number}. Podés recuperar sus datos o seguir escribiendo normalmente. El SKU no limita el título ni la categoría.</span>
             </div>
             <div className="existingSkuActions">
-              <button type="button" className="secondary" onClick={loadExistingProduct}>Cargar datos guardados</button>
+              <button type="button" className="secondary" onClick={()=>run(loadExistingProduct)}>Cargar datos guardados</button>
               <button type="button" className="textButton" onClick={()=>setDismissedExistingSku(form.sku.trim())}>Seguir sin cargar</button>
             </div>
           </div>}
@@ -2330,4 +2523,69 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+
+type Operator = {id: string; username: string; display_name: string; role: "ADMIN" | "SUPERVISOR" | "OPERATOR"};
+
+function AuthenticatedPublisher() {
+  const [operator, setOperator] = useState<Operator | null>(null);
+  const [manageUsers, setManageUsers] = useState(false);
+  const [hadSession, setHadSession] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api<Operator>("/api/operator-auth/me")
+      .then(user => {if (!cancelled) {setOperator(user); setHadSession(true);}})
+      .catch(() => {if (!cancelled) setOperator(null);})
+      .finally(() => {if (!cancelled) setLoading(false);});
+    return () => {cancelled = true;};
+  }, []);
+  useEffect(() => {
+    const expired = () => {setManageUsers(false); setOperator(null); setError("La sesión caducó. Ingresá nuevamente para continuar sin perder los datos abiertos.");};
+    window.addEventListener("publisher-session-expired", expired);
+    return () => window.removeEventListener("publisher-session-expired", expired);
+  }, []);
+  async function login(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setError("");
+    setSubmitting(true);
+    try {
+      const user = await api<Operator>("/api/operator-auth/login", {
+        method: "POST", body: JSON.stringify({username, password}),
+      });
+      setPassword("");
+      setOperator(user);
+      setHadSession(true);
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "No se pudo iniciar sesión");
+    } finally {
+      setSubmitting(false);
+    }
+  }
+  async function logout() {
+    try {
+      await api<void>("/api/operator-auth/logout", {method: "POST"});
+      setOperator(null);
+      setManageUsers(false);
+      setPassword("");
+      window.location.reload();
+    } catch (failure) {
+      setError(failure instanceof Error ? failure.message : "No se pudo cerrar sesión");
+    }
+  }
+  if (loading) return <div className="loginViewport"><section className="loginCard"><p>Verificando sesión…</p></section></div>;
+  const loginScreen = <div className="loginViewport"><form className="loginCard" onSubmit={login}>
+    <h1>Publicador ML</h1><p>Accedé con tu usuario interno.</p>
+    <label>Usuario<input required autoComplete="username" value={username} onChange={e => setUsername(e.target.value)}/></label>
+    <label>Contraseña<input required autoComplete="current-password" type="password" value={password} onChange={e => setPassword(e.target.value)}/></label>
+    {error && <p role="alert" className="loginError">{error}</p>}
+    <button disabled={submitting} type="submit">{submitting ? "Ingresando…" : "Ingresar"}</button>
+  </form></div>;
+  if (!operator && !hadSession) return loginScreen;
+  return <>{!operator && loginScreen}<div style={{display: operator ? undefined : "none"}}>{operator && <div className="operatorSessionBar"><span>{operator.display_name} · {operator.role}</span>{operator.role !== "OPERATOR" && <button className="secondary tiny" type="button" onClick={() => setManageUsers(value => !value)}>{manageUsers ? "Volver al Publicador" : "Usuarios y permisos"}</button>}<button className="secondary tiny" type="button" onClick={logout}>Cerrar sesión</button></div>}{operator && manageUsers && operator.role !== "OPERATOR" && <OperatorUsers actor={operator} onBack={() => setManageUsers(false)}/>}<div style={{display: manageUsers ? "none" : undefined}}><App /></div></div></>;
+}
+
+createRoot(document.getElementById("root")!).render(<AuthenticatedPublisher />);

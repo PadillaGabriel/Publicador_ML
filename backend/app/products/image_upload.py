@@ -54,6 +54,7 @@ def persist_staged_product_images(
     *,
     version_id: uuid.UUID,
     staged_images: list[StagedProductImage],
+    actor_user_id: uuid.UUID | None = None,
 ) -> list[ProductImage]:
     """Persist a batch with one row lock, one MAX(position) lookup and one commit."""
 
@@ -95,6 +96,7 @@ def persist_staged_product_images(
                 "ProductVersion",
                 str(version_id),
                 {"image_id": str(image.id), "position": position},
+                actor_user_id=actor_user_id,
             )
 
         db.commit()
@@ -113,6 +115,7 @@ def persist_product_image(
     mime_type: str,
     content: bytes,
     upload_dir: Path,
+    actor_user_id: uuid.UUID | None = None,
 ) -> ProductImage:
     """Compatibility path for a single image upload."""
 
@@ -126,4 +129,5 @@ def persist_product_image(
         db,
         version_id=version_id,
         staged_images=[staged],
+        actor_user_id=actor_user_id,
     )[0]

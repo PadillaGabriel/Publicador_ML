@@ -1,6 +1,6 @@
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -15,6 +15,8 @@ from app.drafts.validation_service import (
     validate_single_draft,
 )
 from app.integrations.mercadolibre.client import MercadoLibreError
+from app.operator_auth import request_identity
+from app.product_edit_leases import require_edit_token
 from app.persistence import (
     DraftBatch, KeywordSnapshot, ProductVersion, PublicationDraft, TitleGenerationRun, ValidationResult
 )
@@ -59,9 +61,11 @@ class TitleUpdate(BaseModel):
 
 
 @router.post("/generate")
-def generate(payload: GenerateRequest, db: Session = Depends(get_db)):
+def generate(payload: GenerateRequest, request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
     batch = generate_drafts(
         db,
+        actor_user_id=actor.id,
         product_version_id=payload.product_version_id,
         account_id=payload.account_id,
         count=payload.count,
@@ -147,7 +151,8 @@ def batch_detail(batch_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.patch("/{draft_id}/title")
-def update_title(draft_id: uuid.UUID, payload: TitleUpdate, db: Session = Depends(get_db)):
+def update_title(draft_id: uuid.UUID, payload: TitleUpdate, request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
     draft = db.get(PublicationDraft, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found.")
@@ -155,7 +160,7 @@ def update_title(draft_id: uuid.UUID, payload: TitleUpdate, db: Session = Depend
         raise HTTPException(status_code=409, detail="Published/publishing drafts are immutable.")
     draft.title = payload.title.strip()
     draft.status = DraftStatus.GENERATED
-    audit(db, "DRAFT_TITLE_UPDATED", "PublicationDraft", str(draft.id), {"title": draft.title})
+    audit(db, "DRAFT_TITLE_UPDATED", "PublicationDraft", str(draft.id), actor_user_id=actor.id)
     db.commit()
     return {"id": draft.id, "title": draft.title, "status": draft.status}
 
@@ -167,11 +172,22 @@ def update_title(draft_id: uuid.UUID, payload: TitleUpdate, db: Session = Depend
 def correct_batch_product(
     batch_id: uuid.UUID,
     payload: BatchProductCorrection,
+    request: Request,
     db: Session = Depends(get_db),
+    x_product_lease_token: str | None = Header(default=None),
+    x_expected_product_version: uuid.UUID | None = Header(default=None),
 ):
+    actor, operator_session = request_identity(db, request)
+    if x_expected_product_version is None:
+        raise HTTPException(status_code=428, detail="Indicá la versión de ficha utilizada por el lote")
     version = rebase_batch_product_version(
         db,
         batch_id=batch_id,
+        expected_product_version_id=x_expected_product_version,
+        authorization=lambda product_id: require_edit_token(
+            db, actor, operator_session, product_id, x_product_lease_token
+        ),
+        actor_user_id=actor.id,
         description=payload.description,
         price=payload.price,
         quantity=payload.quantity,
@@ -197,6 +213,7 @@ def correct_batch_product(
 
 @router.post("/batches/{batch_id}/validate")
 def validate_batch(batch_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
     batch = db.get(DraftBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found.")
@@ -205,7 +222,6 @@ def validate_batch(batch_id: uuid.UUID, request: Request, db: Session = Depends(
         outcomes = validate_batch_drafts(
             db,
             batch=batch,
-            image_url_for=lambda image_id: str(request.url_for("serve_upload", image_id=image_id)),
         )
     except MercadoLibreError as exc:
         raise HTTPException(
@@ -213,6 +229,7 @@ def validate_batch(batch_id: uuid.UUID, request: Request, db: Session = Depends(
             detail="Mercado Libre no pudo ejecutar la validación previa. Volvé a intentar.",
         ) from exc
 
+    audit(db, "DRAFT_BATCH_VALIDATED", "DraftBatch", str(batch.id), {"validated": len(outcomes), "ready": sum(outcome.valid for outcome in outcomes)}, actor_user_id=actor.id)
     db.commit()
     results = [
         {
@@ -235,6 +252,7 @@ def validate_batch(batch_id: uuid.UUID, request: Request, db: Session = Depends(
 
 @router.post("/{draft_id}/validate")
 def validate(draft_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
     draft = db.get(PublicationDraft, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found.")
@@ -242,13 +260,13 @@ def validate(draft_id: uuid.UUID, request: Request, db: Session = Depends(get_db
         outcome = validate_single_draft(
             db,
             draft=draft,
-            image_url_for=lambda image_id: str(request.url_for("serve_upload", image_id=image_id)),
         )
     except MercadoLibreError as exc:
         raise HTTPException(
             status_code=502,
             detail="Mercado Libre no pudo ejecutar la validación previa. Volvé a intentar.",
         ) from exc
+    audit(db, "DRAFT_VALIDATED", "PublicationDraft", str(draft.id), {"valid": outcome.valid}, actor_user_id=actor.id)
     db.commit()
     return {
         "valid": outcome.valid,
@@ -259,11 +277,12 @@ def validate(draft_id: uuid.UUID, request: Request, db: Session = Depends(get_db
 
 
 @router.post("/batches/{batch_id}/approve-ready")
-def approve_batch_ready(batch_id: uuid.UUID, db: Session = Depends(get_db)):
+def approve_batch_ready(batch_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
     batch = db.get(DraftBatch, batch_id)
     if not batch:
         raise HTTPException(status_code=404, detail="Batch not found.")
-    approved = approve_ready_drafts(db, batch_id=batch_id)
+    approved = approve_ready_drafts(db, batch_id=batch_id, actor_user_id=actor.id)
     db.commit()
     return {
         "batch_id": batch_id,
@@ -273,26 +292,28 @@ def approve_batch_ready(batch_id: uuid.UUID, db: Session = Depends(get_db)):
 
 
 @router.post("/{draft_id}/approve")
-def approve(draft_id: uuid.UUID, db: Session = Depends(get_db)):
+def approve(draft_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
     draft = db.get(PublicationDraft, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found.")
     if draft.status != DraftStatus.READY:
         raise HTTPException(status_code=409, detail="Only READY drafts can be approved.")
     draft.status = DraftStatus.APPROVED
-    audit(db, "DRAFT_APPROVED", "PublicationDraft", str(draft.id))
+    audit(db, "DRAFT_APPROVED", "PublicationDraft", str(draft.id), actor_user_id=actor.id)
     db.commit()
     return {"id": draft.id, "status": draft.status}
 
 
 @router.post("/{draft_id}/exclude")
-def exclude(draft_id: uuid.UUID, db: Session = Depends(get_db)):
+def exclude(draft_id: uuid.UUID, request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
     draft = db.get(PublicationDraft, draft_id)
     if not draft:
         raise HTTPException(status_code=404, detail="Draft not found.")
     if draft.status in {DraftStatus.PUBLISHING, DraftStatus.PUBLISHED}:
         raise HTTPException(status_code=409, detail="Cannot exclude a publishing/published draft.")
     draft.status = DraftStatus.EXCLUDED
-    audit(db, "DRAFT_EXCLUDED", "PublicationDraft", str(draft.id))
+    audit(db, "DRAFT_EXCLUDED", "PublicationDraft", str(draft.id), actor_user_id=actor.id)
     db.commit()
     return {"id": draft.id, "status": draft.status}

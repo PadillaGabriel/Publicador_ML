@@ -49,6 +49,9 @@ class ProductMaster(Base):
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     internal_sku: Mapped[str] = mapped_column(String(120), unique=True)
     internal_name: Mapped[str] = mapped_column(String(255))
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("operator_users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     versions: Mapped[list["ProductVersion"]] = relationship(
         back_populates="master", cascade="all, delete-orphan"
@@ -259,6 +262,9 @@ class WorkerHeartbeat(Base):
 class Job(Base):
     __tablename__ = "jobs"
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    requested_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("operator_users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     type: Mapped[str] = mapped_column(String(50), default="PUBLICATION")
     status: Mapped[str] = mapped_column(String(40), default="PENDING", index=True)
     total: Mapped[int] = mapped_column(Integer)
@@ -325,9 +331,13 @@ class PricingCostComponent(Base):
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
+    actor_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), ForeignKey("operator_users.id", ondelete="SET NULL"), nullable=True, index=True)
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     event_type: Mapped[str] = mapped_column(String(100), index=True)
     entity_type: Mapped[str] = mapped_column(String(80))
     entity_id: Mapped[str] = mapped_column(String(120), index=True)
     payload: Mapped[dict] = mapped_column(JSONB, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+# Register operator identity tables on Base.metadata for Alembic and metadata consumers.
+from app.identity import OperatorUser, OperatorSession, OperatorAccountGrant, ProductEditLease  # noqa: F401,E402
