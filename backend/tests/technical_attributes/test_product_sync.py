@@ -52,7 +52,8 @@ def test_save_product_version_syncs_technical_library(monkeypatch):
             if hasattr(obj, "id") and obj.id is None:
                 obj.id = uuid.uuid4()
     db.flush.side_effect = flush
-    monkeypatch.setattr(products_service, "audit", lambda *args, **kwargs: None)
+    audit_events = []
+    monkeypatch.setattr(products_service, "audit", lambda *args, **kwargs: audit_events.append((args, kwargs)))
     captured = {}
     monkeypatch.setattr(
         products_service,
@@ -61,9 +62,11 @@ def test_save_product_version_syncs_technical_library(monkeypatch):
         raising=False,
     )
 
-    master, version, created = products_service.save_product_version(db, _payload())
+    actor_id = uuid.uuid4()
+    master, version, created = products_service.save_product_version(db, _payload(), actor_user_id=actor_id)
 
     assert created is True
+    assert audit_events[0][1]["actor_user_id"] == actor_id
     assert captured["product_master_id"] == master.id
     assert captured["attributes"] == {"BRAND": {"value_name": "Marca X"}}
     assert captured["source_category_id"] == "MLA1"
@@ -90,7 +93,7 @@ def test_rebase_syncs_corrected_product_version(monkeypatch):
     )
     db = MagicMock()
     db.get.side_effect = lambda model, key: batch if model is DraftBatch and key == batch_id else current if model is ProductVersion and key == current_id else None
-    db.scalar.return_value = 1
+    db.scalar.side_effect = [batch, 1]
 
     def flush():
         for call in db.add.call_args_list:
@@ -110,6 +113,9 @@ def test_rebase_syncs_corrected_product_version(monkeypatch):
     corrected = drafts_service.rebase_batch_product_version(
         db,
         batch_id=batch_id,
+        expected_product_version_id=current_id,
+        authorization=lambda product_id: None,
+        actor_user_id=uuid.uuid4(),
         description="Corregido",
         price=1200,
         quantity=2,

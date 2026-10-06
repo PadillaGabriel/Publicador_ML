@@ -2,6 +2,7 @@ import uuid
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -12,6 +13,13 @@ from app.technical_attributes.schemas import ReuseTechnicalAttributesResult
 
 PRODUCT_ID = uuid.uuid4()
 ACCOUNT_ID = uuid.uuid4()
+
+
+@pytest.fixture(autouse=True)
+def authenticated_test_actor(monkeypatch):
+    from app.technical_attributes import router as module
+    monkeypatch.setattr(module, "request_identity", lambda db, request: (SimpleNamespace(role="ADMIN", id=uuid.uuid4()), None))
+    monkeypatch.setattr(module, "visible_product", lambda db, actor, product_id: db.get(object, product_id))
 
 
 def _app_with_db(db):

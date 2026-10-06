@@ -616,3 +616,26 @@ aside .status {position:static;margin-top:auto;padding:22px 7px 0;line-height:1.
 .operatorAdminSuccess{background:#eaf8ee;color:#23653b;border:1px solid #afe1bd}
 .operatorAdminScope{color:#65738a;font-size:12px;margin-top:20px}
 @media(max-width:770px){.operatorAdminGrid{grid-template-columns:1fr}.operatorAdminHeader{flex-wrap:wrap}.operatorSessionBar{flex-wrap:wrap}.operatorAdminPage{padding:18px 12px 36px}}
+
+/* Consultas del gestor: aisladas del estado de creación de fichas. */
+.managerPanel {display: grid; gap: 1rem; max-width: 100%;}
+.managerHeader {display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem;}
+.managerHeader h1 {margin: 0 0 .4rem;}
+.managerHeader p {max-width: 68ch; margin: 0;}
+.managerTabs {display: flex; gap: .6rem; flex-wrap: wrap;}
+.managerTabs button {width: auto;}
+.managerTabs button.active {border-color: var(--primary, #2762b6); font-weight: 700;}
+.managerFilters {display: flex; gap: .8rem; align-items: end; flex-wrap: wrap;}
+.managerFilters label {display: grid; gap: .25rem; min-width: 12rem; flex: 1;}
+.managerFilters label:first-child {flex: 2;}
+.managerFilters button {width: auto;}
+.managerTableWrap {overflow-x: auto; background: #fff; border-radius: .75rem;}
+.managerTable {width: 100%; min-width: 750px; border-collapse: collapse;}
+.managerTable th, .managerTable td {padding: .8rem; text-align: left; border-bottom: 1px solid #e4e8ee; font-size: .92rem; vertical-align: top;}
+.managerTable th {white-space: nowrap; background: #eef2f8;}
+.managerTable td:nth-child(3) {max-width: 25rem;}
+.managerError {color: #9e1822; font-weight: 600;}
+.managerCount {margin: 0; color: #526277;}
+.managerPager {display: flex; justify-content: flex-end; gap: .6rem;}
+.managerPager button {width: auto;}
+@media (max-width: 800px) {.managerHeader {flex-direction: column;} .managerFilters label {min-width: 100%;}}

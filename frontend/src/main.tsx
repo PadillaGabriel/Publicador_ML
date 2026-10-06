@@ -9,6 +9,7 @@ import {applyReusableAttributes} from "./technical-attributes/reuse";
 import {buildImportedProductSeed} from "./technical-attributes/publication-import";
 import type {MlaPublicationSnapshot, ReuseTechnicalAttributesResult} from "./technical-attributes/types";
 import {OperatorUsers} from "./OperatorUsers";
+import {PublicationManager} from "./PublicationManager";
 import "./styles.css";
 
 type Account = {
@@ -210,7 +211,7 @@ function buildMeasurementValue(numberText: string, unit: string) {
   };
 }
 
-function App() {
+function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categorySuggestions, setCategorySuggestions] = useState<CategorySuggestion[]>([]);
   const [selectedCategoryName, setSelectedCategoryName] = useState("");
@@ -315,7 +316,7 @@ function App() {
   const [pricingListingTypeId, setPricingListingTypeId] = useState("");
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
-  const [activeView, setActiveView] = useState<"publisher" | "pricing-settings" | "price-calculator">("publisher");
+  const [activeView, setActiveView] = useState<"publisher" | "pricing-settings" | "price-calculator" | "manager">("publisher");
   const [publisherStep, setPublisherStep] = useState<"category" | "technical" | "prices" | "shipping" | "images" | "review" | "execution">("category");
   const [lastAction, setLastAction] = useState("Todavía no hay acciones en esta ficha.");
   const [lastSavedAt, setLastSavedAt] = useState("");
@@ -1859,6 +1860,7 @@ function App() {
         <div className="muted">Gestión masiva de publicaciones</div>
         <nav className="primaryNav" aria-label="Navegación principal">
           <button type="button" className={activeView === "publisher" ? "active" : ""} onClick={()=>setActiveView("publisher")}>Publicador</button>
+          <button type="button" className={activeView === "manager" ? "active" : ""} onClick={()=>setActiveView("manager")}>Gestor e historial</button>
           <button type="button" className={activeView === "pricing-settings" ? "active" : ""} onClick={()=>setActiveView("pricing-settings")}>Configuración</button>
           <button type="button" className={activeView === "price-calculator" ? "active" : ""} onClick={()=>setActiveView("price-calculator")}>Calculadora</button>
           <button type="button" className="newPublicationAction" onClick={beginNewPublication}>+ Nueva publicación</button>
@@ -1887,6 +1889,10 @@ function App() {
           <span className="dot"/> Publicación real protegida por configuración
         </div>
       </aside>
+
+      <main style={{display: activeView === "manager" ? undefined : "none"}}>
+        {activeView === "manager" && <PublicationManager canAudit={operatorRole !== "OPERATOR"}/>}
+      </main>
 
       <main style={{display: activeView === "pricing-settings" ? undefined : "none"}}>
         
@@ -2585,7 +2591,7 @@ function AuthenticatedPublisher() {
     <button disabled={submitting} type="submit">{submitting ? "Ingresando…" : "Ingresar"}</button>
   </form></div>;
   if (!operator && !hadSession) return loginScreen;
-  return <>{!operator && loginScreen}<div style={{display: operator ? undefined : "none"}}>{operator && <div className="operatorSessionBar"><span>{operator.display_name} · {operator.role}</span>{operator.role !== "OPERATOR" && <button className="secondary tiny" type="button" onClick={() => setManageUsers(value => !value)}>{manageUsers ? "Volver al Publicador" : "Usuarios y permisos"}</button>}<button className="secondary tiny" type="button" onClick={logout}>Cerrar sesión</button></div>}{operator && manageUsers && operator.role !== "OPERATOR" && <OperatorUsers actor={operator} onBack={() => setManageUsers(false)}/>}<div style={{display: manageUsers ? "none" : undefined}}><App /></div></div></>;
+  return <>{!operator && loginScreen}<div style={{display: operator ? undefined : "none"}}>{operator && <div className="operatorSessionBar"><span>{operator.display_name} · {operator.role}</span>{operator.role !== "OPERATOR" && <button className="secondary tiny" type="button" onClick={() => setManageUsers(value => !value)}>{manageUsers ? "Volver al Publicador" : "Usuarios y permisos"}</button>}<button className="secondary tiny" type="button" onClick={logout}>Cerrar sesión</button></div>}{operator && manageUsers && operator.role !== "OPERATOR" && <OperatorUsers actor={operator} onBack={() => setManageUsers(false)}/>}<div style={{display: manageUsers ? "none" : undefined}}><App operatorRole={operator?.role ?? "OPERATOR"} /></div></div></>;
 }
 
 createRoot(document.getElementById("root")!).render(<AuthenticatedPublisher />);

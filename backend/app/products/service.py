@@ -121,6 +121,7 @@ def save_product_version(db: Session, payload: Any, *, actor_user_id: uuid.UUID,
         "ProductMaster",
         str(master.id),
         {"version": version_number, "category_id": payload.category_id},
+        actor_user_id=actor_user_id,
     )
     db.commit()
     return master, version, created_master

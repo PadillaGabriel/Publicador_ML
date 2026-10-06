@@ -113,9 +113,12 @@ def test_same_account_foreign_product_denied(path, method, body, monkeypatch):
     assert error.value.status_code == 403
 
 
-def test_operator_cannot_rebase_product_around_lease():
+def test_operator_may_correct_own_batch_only_when_handler_validates_lease():
+    # Account/ownership are resolved at the boundary. The handler enforces
+    # expected_version and the fencing token in its write transaction.
+    scope.scope_operation(None, USER, "/api/drafts/batches/own/product-correction", "POST", {}, {})
     with pytest.raises(HTTPException) as error:
-        scope.scope_operation(None, USER, "/api/drafts/batches/own/product-correction", "POST", {}, {})
+        scope.scope_operation(None, USER, "/api/drafts/batches/foreign/product-correction", "POST", {}, {})
     assert error.value.status_code == 403
 
 

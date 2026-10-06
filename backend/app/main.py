@@ -13,6 +13,7 @@ from app.core.logging import configure_logging
 from app.core.static_frontend import mount_static_frontend
 from app.drafts.router import router as drafts_router
 from app.jobs import router as jobs_router
+from app.manager_router import router as manager_router
 from app.persistence import ProductImage, ProductVersion
 from app.operator_auth import request_identity
 from app.product_edit_leases import visible_product
@@ -57,6 +58,7 @@ app.include_router(pricing_router)
 app.include_router(drafts_router)
 app.include_router(publication_router)
 app.include_router(jobs_router)
+app.include_router(manager_router)
 app.include_router(title_intelligence_router)
 app.include_router(technical_attributes_router)
 app.include_router(publication_import_router)

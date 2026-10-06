@@ -2,13 +2,19 @@ from datetime import timedelta
 from uuid import uuid4
 
 import pytest
+from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from app.accounts import service as accounts_service
 from app.core.db import get_db
 from app.core.time import utcnow
 from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
-from app.main import app
+from app.title_intelligence.router import router as title_router
+
+# Exercise title domain HTTP behavior in isolation; authentication is tested by
+# the operator-access suite and must never be disabled on the production app.
+app = FastAPI()
+app.include_router(title_router)
 from app.persistence import KeywordTrendSnapshot
 from app.publication import router as publication_router
 from app.title_intelligence import service as title_service
