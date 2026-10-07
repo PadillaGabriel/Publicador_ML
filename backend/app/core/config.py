@@ -44,6 +44,11 @@ class Settings(BaseSettings):
     ml_live_publication_enabled: bool = False
     ml_preflight_concurrency: int = 6
 
+    # Exact Mercado Libre economic probes are process-local and contain no business CMV/margin.
+    # A larger bounded cache lets recalculations reuse marketplace responses without approximation.
+    pricing_cache_max_entries: int = 2048
+    pricing_cache_ttl_seconds: float = 600.0
+
     keyword_local_embeddings_enabled: bool = False
     keyword_embedding_model: str = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
     hf_token: str = ""

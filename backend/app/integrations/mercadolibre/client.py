@@ -120,6 +120,35 @@ class MercadoLibreClient:
             )
         return PublishResponse(response.status_code, self._safe_json(response))
 
+
+    def put(
+        self,
+        path: str,
+        payload: dict,
+        *,
+        extra_headers: dict[str, str] | None = None,
+    ) -> PublishResponse:
+        try:
+            response = _get_shared_http_client(self._base_url, self._timeout).put(
+                path,
+                json=payload,
+                headers={
+                    **self._headers(),
+                    "Content-Type": "application/json",
+                    **(extra_headers or {}),
+                },
+            )
+        except httpx.TimeoutException as exc:
+            raise MercadoLibreError("Mercado Libre update request timed out.") from exc
+        except httpx.RequestError as exc:
+            raise MercadoLibreError("Mercado Libre update request failed.") from exc
+        if response.is_error:
+            body = self._safe_json(response)
+            raise MercadoLibreError(
+                f"Mercado Libre HTTP {response.status_code}", response.status_code, body
+            )
+        return PublishResponse(response.status_code, self._safe_json(response))
+
     @staticmethod
     def _safe_json(response: httpx.Response) -> dict:
         try:
@@ -238,14 +267,50 @@ class MercadoLibreClient:
     def create_item(self, payload: dict) -> PublishResponse:
         return self.post("/items", payload)
 
+    def update_item(self, item_id: str, payload: dict) -> PublishResponse:
+        return self.put(f"/items/{item_id}", payload)
+
     def create_item_description(self, item_id: str, plain_text: str) -> PublishResponse:
         return self.post(f"/items/{item_id}/description", {"plain_text": plain_text})
+
+    def update_item_description(self, item_id: str, plain_text: str) -> PublishResponse:
+        return self.put(f"/items/{item_id}/description", {"plain_text": plain_text})
 
     def item_description(self, item_id: str) -> dict:
         value = self.get(f"/items/{item_id}/description")
         if not isinstance(value, dict):
             raise MercadoLibreError("Unexpected item description response.")
         return value
+
+    def sync_item_description(self, item_id: str, plain_text: str) -> PublishResponse:
+        """Create or update an item description idempotently.
+
+        Mercado Libre rejects POST when a description already exists. A GET decides
+        the normal path; the POST branch still handles a create race by retrying as
+        PUT when ML reports ``item.description.invalid``.
+        """
+        try:
+            self.item_description(item_id)
+        except MercadoLibreError as exc:
+            if exc.status_code != 404:
+                raise
+            try:
+                return self.create_item_description(item_id, plain_text)
+            except MercadoLibreError as create_exc:
+                cause = str((create_exc.payload or {}).get("cause") or "")
+                error = str((create_exc.payload or {}).get("error") or "")
+                message = str((create_exc.payload or {}).get("message") or "")
+                already_exists = (
+                    create_exc.status_code == 400
+                    and (
+                        "item.description.invalid" in {cause, error}
+                        or "already has a description" in message.lower()
+                    )
+                )
+                if already_exists:
+                    return self.update_item_description(item_id, plain_text)
+                raise
+        return self.update_item_description(item_id, plain_text)
 
     def item(self, item_id: str) -> dict:
         value = self.get(f"/items/{item_id}")

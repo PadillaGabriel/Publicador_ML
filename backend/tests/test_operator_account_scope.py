@@ -124,3 +124,23 @@ def test_operator_may_correct_own_batch_only_when_handler_validates_lease():
 
 def test_admin_can_still_rebase_product():
     scope.scope_operation(None, SimpleNamespace(role="ADMIN"), "/api/drafts/batches/own/product-correction", "POST", {}, {})
+
+
+@pytest.mark.parametrize("path,method,query,body", [
+    ("/api/pricing/simulate", "POST", {}, {"account_id": str(OTHER_ACCOUNT)}),
+    ("/api/pricing/logistics-quotes", "POST", {}, {"account_id": str(OTHER_ACCOUNT)}),
+    ("/api/catalog/category-suggestions", "GET", {"account_id": str(OTHER_ACCOUNT)}, {}),
+])
+def test_pricing_and_catalog_respect_account_grants(path, method, query, body):
+    with pytest.raises(HTTPException) as exc:
+        scope.scope_operation(None, USER, path, method, query, body)
+    assert exc.value.status_code == 403
+
+
+@pytest.mark.parametrize("path,method,query,body", [
+    ("/api/pricing/simulate", "POST", {}, {"account_id": str(MY_ACCOUNT)}),
+    ("/api/pricing/logistics-quotes", "POST", {}, {"account_id": str(MY_ACCOUNT)}),
+    ("/api/catalog/category-suggestions", "GET", {"account_id": str(MY_ACCOUNT)}, {}),
+])
+def test_pricing_and_catalog_allow_granted_account(path, method, query, body):
+    scope.scope_operation(None, USER, path, method, query, body)

@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.audit.service import audit
 from app.core.db import get_db
 from app.core.enums import DraftStatus
-from app.drafts.service import generate_drafts, rebase_batch_product_version
+from app.drafts.service import generate_drafts, rebase_batch_product_version, rebase_batches_product_version
 from app.drafts.validation_service import (
     approve_ready_drafts,
     validate_batch_drafts,
@@ -18,7 +18,7 @@ from app.integrations.mercadolibre.client import MercadoLibreError
 from app.operator_auth import request_identity
 from app.product_edit_leases import require_edit_token
 from app.persistence import (
-    DraftBatch, KeywordSnapshot, ProductVersion, PublicationDraft, TitleGenerationRun, ValidationResult
+    DraftBatch, KeywordSnapshot, ProductMaster, ProductVersion, PublicationDraft, TitleGenerationRun, ValidationResult
 )
 
 router = APIRouter(prefix="/api/drafts", tags=["drafts"])
@@ -45,6 +45,22 @@ class GenerateRequest(BaseModel):
         return self
 
 
+class GenerateMultiRequest(BaseModel):
+    product_version_id: uuid.UUID
+    account_ids: list[uuid.UUID] = Field(min_length=1, max_length=20)
+    count: int = Field(ge=1, le=100)
+    commercial_distribution: list[CommercialAllocation] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def validate_request(self):
+        if len(self.account_ids) != len(set(self.account_ids)):
+            raise ValueError("No repitas cuentas en una publicación multicuenta.")
+        intents = [p.commercial_intent for p in self.commercial_distribution if p.count > 0]
+        if len(intents) != len(set(intents)):
+            raise ValueError("No repitas la misma modalidad de cuotas en la distribución.")
+        if self.commercial_distribution and sum(p.count for p in self.commercial_distribution) != self.count:
+            raise ValueError("La distribución comercial debe sumar exactamente el total por cuenta.")
+        return self
 
 
 class BatchProductCorrection(BaseModel):
@@ -54,6 +70,24 @@ class BatchProductCorrection(BaseModel):
     attributes: dict = Field(default_factory=dict)
     commercial: dict = Field(default_factory=dict)
     logistics: dict = Field(default_factory=dict)
+
+
+class DraftCommercialUpdate(BaseModel):
+    price_override: float | None = Field(default=None, gt=0)
+    installments_count: int | None = None
+    installment_increment_pct: float | None = Field(default=None, ge=0, lt=100)
+
+    @model_validator(mode="after")
+    def validate_installments(self):
+        if self.installments_count not in (None, 3, 6):
+            raise ValueError("installments_count debe ser 3 o 6.")
+        if self.installments_count is None and self.installment_increment_pct is not None:
+            raise ValueError("Indicá installments_count para aplicar un incremento.")
+        return self
+
+
+class MultiBatchProductCorrection(BatchProductCorrection):
+    batch_ids: list[uuid.UUID] = Field(min_length=1, max_length=20)
 
 
 class TitleUpdate(BaseModel):
@@ -82,6 +116,77 @@ def generate(payload: GenerateRequest, request: Request, db: Session = Depends(g
                 "listing_type_name": d.commercial_config.get("listing_type_name"),
             }
             for d in batch.drafts
+        ],
+    }
+
+
+@router.post("/generate-multi")
+def generate_multi(payload: GenerateMultiRequest, request: Request, db: Session = Depends(get_db)):
+    actor, _ = request_identity(db, request)
+    version = db.get(ProductVersion, payload.product_version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail="Product version not found.")
+
+    # Serialize title reservation for the same master product for the duration of
+    # the complete multi-account generation transaction.
+    db.scalar(
+        select(ProductMaster)
+        .where(ProductMaster.id == version.product_master_id)
+        .with_for_update()
+    )
+    reserved_titles: set[str] = set()
+    batches: list[DraftBatch] = []
+    try:
+        for account_id in payload.account_ids:
+            batch = generate_drafts(
+                db,
+                actor_user_id=actor.id,
+                product_version_id=payload.product_version_id,
+                account_id=account_id,
+                count=payload.count,
+                commercial_distribution=[p.model_dump() for p in payload.commercial_distribution],
+                reserved_titles=reserved_titles,
+                commit=False,
+            )
+            batches.append(batch)
+        audit(
+            db,
+            "DRAFT_MULTI_ACCOUNT_GENERATED",
+            "ProductVersion",
+            str(payload.product_version_id),
+            {
+                "account_ids": [str(value) for value in payload.account_ids],
+                "batch_ids": [str(batch.id) for batch in batches],
+                "drafts_per_account": payload.count,
+                "total_drafts": payload.count * len(payload.account_ids),
+            },
+            actor_user_id=actor.id,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+    return {
+        "product_version_id": payload.product_version_id,
+        "total_drafts": payload.count * len(batches),
+        "batches": [
+            {
+                "batch_id": batch.id,
+                "account_id": batch.account_id,
+                "count": batch.requested_count,
+                "drafts": [
+                    {
+                        "id": draft.id,
+                        "sequence_number": draft.sequence_number,
+                        "title": draft.title,
+                        "status": draft.status,
+                        "commercial_config": draft.commercial_config,
+                    }
+                    for draft in sorted(batch.drafts, key=lambda item: item.sequence_number)
+                ],
+            }
+            for batch in batches
         ],
     }
 
@@ -150,6 +255,37 @@ def batch_detail(batch_id: uuid.UUID, db: Session = Depends(get_db)):
     }
 
 
+@router.patch("/{draft_id}/commercial")
+def update_commercial(
+    draft_id: uuid.UUID, payload: DraftCommercialUpdate, request: Request, db: Session = Depends(get_db)
+):
+    actor, _ = request_identity(db, request)
+    draft = db.get(PublicationDraft, draft_id)
+    if not draft:
+        raise HTTPException(status_code=404, detail="Draft not found.")
+    if draft.status in {DraftStatus.PUBLISHING, DraftStatus.PUBLISHED}:
+        raise HTTPException(status_code=409, detail="Published/publishing drafts are immutable.")
+    old = dict(draft.commercial_config or {})
+    updated = dict(old)
+    for key, value in payload.model_dump().items():
+        if value is None:
+            updated.pop(key, None)
+        else:
+            updated[key] = value
+    draft.commercial_config = updated
+    draft.status = DraftStatus.GENERATED
+    audit(
+        db,
+        "DRAFT_COMMERCIAL_UPDATED",
+        "PublicationDraft",
+        str(draft.id),
+        {"old": old, "new": updated},
+        actor_user_id=actor.id,
+    )
+    db.commit()
+    return {"id": draft.id, "commercial_config": draft.commercial_config, "status": draft.status}
+
+
 @router.patch("/{draft_id}/title")
 def update_title(draft_id: uuid.UUID, payload: TitleUpdate, request: Request, db: Session = Depends(get_db)):
     actor, _ = request_identity(db, request)
@@ -166,6 +302,48 @@ def update_title(draft_id: uuid.UUID, payload: TitleUpdate, request: Request, db
 
 
 
+
+
+@router.post("/batches/multi-product-correction")
+def correct_multi_batch_product(
+    payload: MultiBatchProductCorrection,
+    request: Request,
+    db: Session = Depends(get_db),
+    x_product_lease_token: str | None = Header(default=None),
+    x_expected_product_version: uuid.UUID | None = Header(default=None),
+):
+    actor, operator_session = request_identity(db, request)
+    if x_expected_product_version is None:
+        raise HTTPException(status_code=428, detail="Indicá la versión de ficha utilizada por los lotes")
+    version = rebase_batches_product_version(
+        db,
+        batch_ids=payload.batch_ids,
+        expected_product_version_id=x_expected_product_version,
+        authorization=lambda product_id: require_edit_token(
+            db, actor, operator_session, product_id, x_product_lease_token
+        ),
+        actor_user_id=actor.id,
+        description=payload.description,
+        price=payload.price,
+        quantity=payload.quantity,
+        attributes=payload.attributes,
+        commercial=payload.commercial,
+        logistics=payload.logistics,
+    )
+    return {
+        "batch_ids": payload.batch_ids,
+        "version_id": version.id,
+        "version_number": version.version_number,
+        "images": [
+            {
+                "id": image.id,
+                "original_name": image.original_name,
+                "position": image.position,
+                "mime_type": image.mime_type,
+            }
+            for image in sorted(version.images, key=lambda item: item.position)
+        ],
+    }
 
 
 @router.post("/batches/{batch_id}/product-correction")

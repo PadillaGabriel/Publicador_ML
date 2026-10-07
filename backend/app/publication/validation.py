@@ -24,6 +24,7 @@ from app.integrations.mercadolibre.product_identifiers import (
 from app.persistence import DraftBatch, ProductVersion, PublicationDraft
 from app.publication.commercial import listing_type_for_intent
 from app.publication.quantity_pricing import normalize_b2b_quantity_prices
+from app.publication.payload import resolved_price_for_draft
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,15 +193,6 @@ def build_validation_context(db: Session, batch: DraftBatch) -> DraftValidationC
                 "message": "La garantía del vendedor requiere duración positiva y unidad válida.",
             })
 
-    try:
-        normalize_b2b_quantity_prices(version.commercial, base_price=version.price)
-    except ValueError as exc:
-        errors.append({
-            "code": "INVALID_QUANTITY_PRICING",
-            "field": "commercial.quantity_prices",
-            "message": str(exc),
-        })
-
     required_ids = {
         field["id"]
         for field in metadata.normalized_schema.get("fields", [])
@@ -294,6 +286,18 @@ def validate_draft_with_context(
             "code": "FINANCING_PLAN_NOT_RESOLVED",
             "field": "commercial_intent",
             "message": "La modalidad de cuotas todavía no fue resuelta contra el contrato vigente de Mercado Libre.",
+        })
+
+    try:
+        normalize_b2b_quantity_prices(
+            context.version.commercial,
+            base_price=resolved_price_for_draft(context.version, draft),
+        )
+    except ValueError as exc:
+        errors.append({
+            "code": "INVALID_QUANTITY_PRICING",
+            "field": "commercial.quantity_prices",
+            "message": str(exc),
         })
 
     if not " ".join((draft.title or "").split()).strip():

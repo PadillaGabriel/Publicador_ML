@@ -1,6 +1,6 @@
 import React, {useEffect, useMemo, useRef, useState} from "react";
 import {createRoot} from "react-dom/client";
-import {api, downloadFile, jobEvents, loadReusableTechnicalAttributes, loadShippingCapabilities, previewMlaPublication, resolveMlaPublicationReuse} from "./api";
+import {BASE, api, downloadFile, jobEvents, loadReusableTechnicalAttributes, loadShippingCapabilities, previewMlaPublication, resolveMlaPublicationReuse} from "./api";
 import {PriceCalculator} from "./pricing/PriceCalculator";
 import {PricingProfileEditor} from "./pricing/PricingProfileEditor";
 import {normalizeQuantityPricing, type PricingCalculation, type PricingCalculatorPrefill, type PricingProfile, type QuantityPricingAnalysis, type QuantityPricingApiResponse, type ShippingCapabilities} from "./pricing/types";
@@ -68,6 +68,7 @@ type ProductIdentifierContract = {
 type DraftValidationIssue = {code?: string; field?: string; message?: string};
 type Draft = {
   id: string; sequence_number: number; title: string; score: number;
+  batch_id?: string; account_id?: string; account_nickname?: string;
   commercial_config?: Record<string, any>; status: string; image_order: string[]; last_error?: any;
   validation?: {
     valid: boolean;
@@ -219,6 +220,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const [categoryContractLoading, setCategoryContractLoading] = useState(false);
   const [titleMaxLength, setTitleMaxLength] = useState<number | null>(null);
   const [accountId, setAccountId] = useState("");
+  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
   const [categoryId, setCategoryId] = useState("");
   const [fields, setFields] = useState<Field[]>([]);
   const [requirements, setRequirements] = useState<RequirementGroup[]>([]);
@@ -229,11 +231,14 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const [showSecondaryAttributes, setShowSecondaryAttributes] = useState(false);
   const [versionId, setVersionId] = useState("");
   const [batchId, setBatchId] = useState("");
+  const [batchIds, setBatchIds] = useState<string[]>([]);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [job, setJob] = useState<any>(null);
   const [keywordIntelligence, setKeywordIntelligence] = useState<any>(null);
   const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
   const [generationActive, setGenerationActive] = useState(false);
+  const [validationProgress, setValidationProgress] = useState<{active: boolean; scope: "all" | "single"; message: string}>({active:false, scope:"all", message:""});
+  const [draggedImageId, setDraggedImageId] = useState<string | null>(null);
   const [toasts, setToasts] = useState<ToastNotice[]>([]);
   const toastSequence = useRef(0);
   const dismissToast = React.useCallback((id: number) => {
@@ -317,7 +322,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const [uploadedImages, setUploadedImages] = useState<UploadedImage[]>([]);
   const [imageUploadBusy, setImageUploadBusy] = useState(false);
   const [activeView, setActiveView] = useState<"publisher" | "pricing-settings" | "price-calculator" | "manager">("publisher");
-  const [publisherStep, setPublisherStep] = useState<"category" | "technical" | "prices" | "shipping" | "images" | "review" | "execution">("category");
+  const [publisherStep, setPublisherStep] = useState<"category" | "technical" | "prices" | "images" | "review" | "execution">("category");
   const [lastAction, setLastAction] = useState("Todavía no hay acciones en esta ficha.");
   const [lastSavedAt, setLastSavedAt] = useState("");
   const [savedSignature, setSavedSignature] = useState("");
@@ -339,9 +344,11 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const [shippingCapabilities, setShippingCapabilities] = useState<ShippingCapabilities | null>(null);
   const [shippingCapabilitiesLoading, setShippingCapabilitiesLoading] = useState(false);
   const [shippingCapabilitiesError, setShippingCapabilitiesError] = useState("");
+  const [logisticsQuotes, setLogisticsQuotes] = useState<any>(null);
   const [quantityPricingEnabled, setQuantityPricingEnabled] = useState(false);
   const [quantityPrices, setQuantityPrices] = useState<QuantityPriceTier[]>([]);
   const [quantityPricingAnalysis, setQuantityPricingAnalysis] = useState<QuantityPricingAnalysis | null>(null);
+  const [installmentIncrements, setInstallmentIncrements] = useState({three: "0", six: "0"});
 
   const [form, setForm] = useState({
     sku: "", name: "", title: "", brand: "", model: "", characteristics: "", description: "",
@@ -351,8 +358,8 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
 
   // Only persisted product fields count as unsaved changes. Transient API metadata is excluded.
   const editSignature = JSON.stringify({
-    accountId, categoryId, form, attributes, quantityPricingEnabled, quantityPrices,
-    simulationPackage, productCost,
+    accountId, selectedAccountIds, categoryId, form, attributes, quantityPricingEnabled, quantityPrices,
+    simulationPackage, productCost, installmentIncrements,
   });
   const dirty = Boolean(startMode && (versionId
     ? editSignature !== savedSignature
@@ -378,6 +385,10 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const selectedAccount = useMemo(
     () => accounts.find(account => account.id === accountId),
     [accounts, accountId]
+  );
+  const publicationAccounts = useMemo(
+    () => selectedAccountIds.map(id => accounts.find(account => account.id === id)).filter(Boolean) as Account[],
+    [accounts, selectedAccountIds]
   );
   const totalCount = Math.max(1, Number(form.count) || 1);
   const allocatedCount = commercialAllocations.reduce((sum, option) => sum + Math.max(0, option.count), 0);
@@ -472,7 +483,10 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   async function refreshAccounts() {
     const result = await api<Account[]>("/api/accounts");
     setAccounts(result);
-    if (!accountId && result.length === 1) setAccountId(result[0].id);
+    if (!accountId && result.length === 1) {
+      setAccountId(result[0].id);
+      setSelectedAccountIds([result[0].id]);
+    }
   }
 
   async function searchCategoriesForPricing(pricingAccountId: string, query: string) {
@@ -503,6 +517,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
 
         if (connectedAccountId) {
           setAccountId(connectedAccountId);
+          setSelectedAccountIds([connectedAccountId]);
         }
 
         setMessage("Cuenta de Mercado Libre conectada correctamente.");
@@ -584,12 +599,14 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setVersionId("");
     setUploadedImages([]);
     setBatchId("");
+    setBatchIds([]);
     setDrafts([]);
     setKeywordIntelligence(null);
     setSelectedDraftIds([]);
     setPricingAnalysis(null);
     setShippingCapabilities(null);
     setShippingCapabilitiesError("");
+    setLogisticsQuotes(null);
   }, [accountId]);
 
   useEffect(() => {
@@ -676,6 +693,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setKeywordIntelligence(null);
     setSelectedDraftIds([]);
     setBatchId("");
+    setBatchIds([]);
     Promise.all([
       api<any>(`/api/catalog/categories/${categoryId}?account_id=${encodeURIComponent(accountId)}`),
       loadPublicationTypes(accountId, categoryId),
@@ -887,6 +905,11 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
       amount: Number(tier.amount),
     })));
     setQuantityPricingEnabled(Boolean(version.commercial?.quantity_pricing_enabled ?? savedQuantityPrices.length > 0));
+    const savedInstallments = version.commercial?.installment_increments_pct || {};
+    setInstallmentIncrements({
+      three: String(savedInstallments["3"] ?? savedInstallments[3] ?? "0"),
+      six: String(savedInstallments["6"] ?? savedInstallments[6] ?? "0"),
+    });
     const savedPricing = version.commercial?.pricing_analysis || null;
     const savedPricingInputs = savedPricing?.publisher_inputs || {};
     const savedPackage = version.logistics?.pricing_package || savedPricingInputs.package || {};
@@ -920,6 +943,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setVersionId("");
     setUploadedImages([]);
     setBatchId("");
+    setBatchIds([]);
     setDrafts([]);
     setKeywordIntelligence(null);
     setSelectedDraftIds([]);
@@ -975,6 +999,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setManualMode(false);
     await refreshAccounts();
     setAccountId(result.id);
+    setSelectedAccountIds([result.id]);
     setMessage(`Cuenta ${result.nickname} conectada.`);
   }
 
@@ -1039,6 +1064,34 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
         },
       },
     });
+  }
+
+  async function quoteLogistics() {
+    if (!accountId || !categoryId || !pricingListingTypeId) {
+      throw new Error("Completá cuenta, categoría y modalidad antes de cotizar logística.");
+    }
+    const price = Number(form.price);
+    const weight = Number(simulationPackage.weight);
+    if (!Number.isFinite(price) || price <= 0) throw new Error("Ingresá un precio de venta válido.");
+    if (!simulationPackage.dimensions.trim() || !Number.isFinite(weight) || weight <= 0) {
+      throw new Error("Completá dimensiones y peso para cotizar Flex y Colecta.");
+    }
+    if (simulationPackage.freeShipping === "") throw new Error("Indicá quién paga el envío.");
+    const result = await api<any>("/api/pricing/logistics-quotes", {
+      method: "POST",
+      body: JSON.stringify({
+        account_id: accountId,
+        category_id: categoryId,
+        listing_type_id: pricingListingTypeId,
+        item_price: price,
+        dimensions: simulationPackage.dimensions.trim(),
+        weight,
+        free_shipping: simulationPackage.freeShipping === "true",
+        condition: "new",
+        currency_id: "ARS",
+      }),
+    });
+    setLogisticsQuotes(result);
   }
 
   async function simulateQuantityPrices() {
@@ -1171,6 +1224,10 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
       quantity_prices_draft: tiers.draft,
       quantity_prices: tiers.publishable,
       pricing_analysis: pricingAnalysis,
+      installment_increments_pct: {
+        "3": Number(installmentIncrements.three) || 0,
+        "6": Number(installmentIncrements.six) || 0,
+      },
     };
   }
 
@@ -1296,7 +1353,8 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   }
 
   async function saveCorrectionsAndRevalidate() {
-    if (!batchId || drafts.length === 0) {
+    const activeBatchIds = batchIds.length ? batchIds : (batchId ? [batchId] : []);
+    if (!activeBatchIds.length || drafts.length === 0) {
       await createProduct();
       return;
     }
@@ -1307,26 +1365,35 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     if (!shippingReady) {
       throw new Error("Esperá a que Mercado Libre confirme la configuración de Mercado Envíos antes de revalidar.");
     }
-
     if (!versionId || !productMasterId) {
       throw new Error("No se identificó la versión de ficha asociada al lote. Volvé a cargar la ficha.");
     }
     const correctionToken = await takeEditLease(productMasterId);
-    const correction = await api<any>(`/api/drafts/batches/${batchId}/product-correction`, {
-      method:"POST",
-      headers: {
-        "X-Product-Lease-Token": correctionToken,
-        "X-Expected-Product-Version": versionId,
-      },
-      body:JSON.stringify({
-        description: form.description,
-        price: Number(form.price),
-        quantity: Number(form.quantity),
-        attributes: currentProductAttributes(),
-        commercial: currentCommercialContract(),
-        logistics: currentLogisticsContract(),
-      })
-    });
+    const commonPayload = {
+      description: form.description,
+      price: Number(form.price),
+      quantity: Number(form.quantity),
+      attributes: currentProductAttributes(),
+      commercial: currentCommercialContract(),
+      logistics: currentLogisticsContract(),
+    };
+    const correction = activeBatchIds.length > 1
+      ? await api<any>("/api/drafts/batches/multi-product-correction", {
+          method:"POST",
+          headers: {
+            "X-Product-Lease-Token": correctionToken,
+            "X-Expected-Product-Version": versionId,
+          },
+          body:JSON.stringify({...commonPayload, batch_ids: activeBatchIds})
+        })
+      : await api<any>(`/api/drafts/batches/${activeBatchIds[0]}/product-correction`, {
+          method:"POST",
+          headers: {
+            "X-Product-Lease-Token": correctionToken,
+            "X-Expected-Product-Version": versionId,
+          },
+          body:JSON.stringify(commonPayload)
+        });
 
     setVersionId(correction.version_id);
     setExistingProduct(previous => previous && previous.id === productMasterId
@@ -1335,15 +1402,19 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setUploadedImages((correction.images || []) as UploadedImage[]);
     setSavedSignature(editSignature);
     setLastSavedAt(new Date().toLocaleString("es-AR"));
-    setLastAction("Correcciones guardadas y lote revalidado.");
+    setLastAction("Correcciones guardadas y operación revalidada.");
 
-    const validation = await api<any>(`/api/drafts/batches/${batchId}/validate`, {method:"POST"});
-    await loadBatch(batchId);
-    const firstIssue = validation.results?.flatMap((result:any) => result.errors || [])[0];
+    const validations = await Promise.all(activeBatchIds.map(id =>
+      api<any>(`/api/drafts/batches/${id}/validate`, {method:"POST"})
+    ));
+    await loadBatches(activeBatchIds);
+    const ready = validations.reduce((sum, value) => sum + Number(value.ready || 0), 0);
+    const invalid = validations.reduce((sum, value) => sum + Number(value.invalid || 0), 0);
+    const firstIssue = validations.flatMap(value => value.results || []).flatMap((result:any) => result.errors || [])[0];
     setMessage(
       `Correcciones guardadas en la versión ${correction.version_number}. ` +
-      `${validation.ready} borrador(es) listos y ${validation.invalid} con observaciones.` +
-      (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : " No fue necesario regenerar el lote.")
+      `${ready} borrador(es) listos y ${invalid} con observaciones.` +
+      (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : " No fue necesario regenerar títulos.")
     );
   }
 
@@ -1403,6 +1474,43 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     }
   }
 
+  async function persistImageOrder(ordered: UploadedImage[]) {
+    if (!versionId || !productMasterId) return;
+    const token = await takeEditLease(productMasterId);
+    const result = await api<any>(`/api/products/versions/${versionId}/images/order`, {
+      method:"PUT",
+      headers:{"X-Product-Lease-Token":token},
+      body:JSON.stringify({image_ids: ordered.map(image => image.id)}),
+    });
+    setUploadedImages(result.images || []);
+    setMessage("Orden de imágenes guardado. La primera imagen será la principal en todas las publicaciones.");
+  }
+
+  async function dropImageAt(targetImageId: string, placeAfter: boolean) {
+    if (!draggedImageId || draggedImageId === targetImageId) return;
+    const sourceIndex = uploadedImages.findIndex(image => image.id === draggedImageId);
+    const originalTargetIndex = uploadedImages.findIndex(image => image.id === targetImageId);
+    if (sourceIndex < 0 || originalTargetIndex < 0) return;
+    const ordered = [...uploadedImages];
+    const [moved] = ordered.splice(sourceIndex, 1);
+    let targetIndex = ordered.findIndex(image => image.id === targetImageId);
+    if (targetIndex < 0) return;
+    if (placeAfter) targetIndex += 1;
+    ordered.splice(targetIndex, 0, moved);
+    setDraggedImageId(null);
+    await persistImageOrder(ordered);
+  }
+
+  async function deleteUploadedImage(imageId: string) {
+    if (!versionId || !productMasterId) return;
+    const token = await takeEditLease(productMasterId);
+    const result = await api<any>(`/api/products/versions/${versionId}/images/${imageId}`, {
+      method:"DELETE", headers:{"X-Product-Lease-Token":token}
+    });
+    setUploadedImages(result.images || []);
+    setMessage("Imagen eliminada y posiciones normalizadas.");
+  }
+
   function updateCommercialAllocation(commercialIntent: string, raw: string) {
     const count = Math.max(0, Number(raw) || 0);
     setCommercialAllocations(rows => rows.map(
@@ -1414,51 +1522,95 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     if (distributionInvalid) {
       throw new Error("La distribución comercial debe sumar exactamente el total de publicaciones.");
     }
+    const targetAccounts = selectedAccountIds.length ? selectedAccountIds : (accountId ? [accountId] : []);
+    if (!targetAccounts.length) throw new Error("Seleccioná al menos una cuenta de Mercado Libre.");
     const confirmedImages = await refreshUploadedImages();
     if (confirmedImages.length === 0) {
-      throw new Error("Las imágenes seleccionadas todavía no fueron cargadas al backend. Cargá al menos una imagen válida antes de generar borradores.");
+      throw new Error("Cargá al menos una imagen válida antes de generar borradores.");
     }
     setGenerationActive(true);
     try {
       const distribution = commercialAllocations
         .filter(row => row.count > 0)
         .map(row => ({commercial_intent: row.commercial_intent, count: row.count}));
-      const result = await api<any>("/api/drafts/generate", {
-        method:"POST",
-        body:JSON.stringify({
-          product_version_id: versionId,
-          account_id: accountId,
-          count: totalCount,
-          commercial_distribution: distribution
-        })
-      });
-      setBatchId(result.batch_id);
-      await loadBatch(result.batch_id);
-      setLastAction(`${result.count} borradores generados. Siguiente: revisar y validar.`);
+      if (targetAccounts.length > 1) {
+        const result = await api<any>("/api/drafts/generate-multi", {
+          method:"POST",
+          body:JSON.stringify({
+            product_version_id: versionId,
+            account_ids: targetAccounts,
+            count: totalCount,
+            commercial_distribution: distribution
+          })
+        });
+        const ids = (result.batches || []).map((batch:any) => String(batch.batch_id));
+        setBatchIds(ids);
+        setBatchId(ids[0] || "");
+        await loadBatches(ids);
+        setLastAction(`${result.total_drafts} borradores generados en ${ids.length} cuentas. Siguiente: revisar y validar.`);
+        setMessage(`${result.total_drafts} borradores multicuenta generados con títulos reservados de forma única.`);
+      } else {
+        const result = await api<any>("/api/drafts/generate", {
+          method:"POST",
+          body:JSON.stringify({
+            product_version_id: versionId,
+            account_id: targetAccounts[0],
+            count: totalCount,
+            commercial_distribution: distribution
+          })
+        });
+        setBatchId(result.batch_id);
+        setBatchIds([result.batch_id]);
+        await loadBatches([result.batch_id]);
+        setLastAction(`${result.count} borradores generados. Siguiente: revisar y validar.`);
+        setMessage(`${result.count} borradores generados con condiciones comerciales confirmadas por Mercado Libre.`);
+      }
       setPublisherStep("review");
-      setMessage(`${result.count} borradores generados con condiciones comerciales confirmadas por Mercado Libre.`);
     } finally {
       setGenerationActive(false);
     }
   }
 
+  async function loadBatches(ids = (batchIds.length ? batchIds : (batchId ? [batchId] : []))) {
+    if (!ids.length) {
+      setDrafts([]);
+      return;
+    }
+    const results = await Promise.all(ids.map(id => api<any>(`/api/drafts/batches/${id}`)));
+    const accountById = new Map(accounts.map(account => [account.id, account.nickname]));
+    const merged: Draft[] = results.flatMap(result =>
+      (result.drafts || []).map((draft: Draft) => ({
+        ...draft,
+        batch_id: String(result.id),
+        account_id: String(result.account_id),
+        account_nickname: accountById.get(String(result.account_id)) || String(result.account_id),
+      }))
+    );
+    setDrafts(merged);
+    setKeywordIntelligence(results[0]?.keyword_intelligence || null);
+    setSelectedDraftIds(current => current.filter(draftId => merged.some(draft => draft.id === draftId)));
+  }
+
   async function loadBatch(id = batchId) {
-    if (!id) return;
-    const result = await api<any>(`/api/drafts/batches/${id}`);
-    setDrafts(result.drafts);
-    setKeywordIntelligence(result.keyword_intelligence || null);
-    setSelectedDraftIds(current => current.filter(draftId => result.drafts.some((draft: Draft) => draft.id === draftId)));
+    const ids = batchIds.length > 1 && (!id || id === batchId) ? batchIds : (id ? [id] : []);
+    await loadBatches(ids);
   }
 
   async function validateDraft(id: string) {
-    const result = await api<any>(`/api/drafts/${id}/validate`, {method:"POST"});
-    await loadBatch();
-    const firstIssue = result.errors?.[0];
-    setMessage(
-      result.valid
-        ? "El borrador pasó la validación previa de Mercado Libre."
-        : `Falta corregir: ${firstIssue?.message || "Mercado Libre rechazó la validación previa."}`
-    );
+    setValidationProgress({active:true, scope:"single", message:"Preparando el borrador y consultando la prevalidación de Mercado Libre…"});
+    try {
+      const result = await api<any>(`/api/drafts/${id}/validate`, {method:"POST"});
+      setValidationProgress({active:true, scope:"single", message:"Procesando la respuesta de Mercado Libre y actualizando el estado del borrador…"});
+      await loadBatch();
+      const firstIssue = result.errors?.[0];
+      setMessage(
+        result.valid
+          ? "El borrador pasó la validación previa de Mercado Libre."
+          : `Falta corregir: ${firstIssue?.message || "Mercado Libre rechazó la validación previa."}`
+      );
+    } finally {
+      setValidationProgress({active:false, scope:"single", message:""});
+    }
   }
 
   async function approveDraft(id: string) {
@@ -1466,22 +1618,53 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     await loadBatch();
   }
 
+  async function updateDraftCommercial(id: string, patch: Record<string, any>) {
+    await api(`/api/drafts/${id}/commercial`, {method:"PATCH", body:JSON.stringify(patch)});
+    await loadBatch();
+    setMessage("Configuración comercial del borrador actualizada. Volvé a validarlo antes de publicar.");
+  }
+
+  async function editDraftPriceOverride(draft: Draft) {
+    const current = draft.commercial_config?.price_override ?? form.price;
+    const raw = window.prompt("Precio manual para esta publicación. Dejalo vacío para volver al precio calculado por plan.", String(current ?? ""));
+    if (raw === null) return;
+    const trimmed = raw.trim();
+    if (!trimmed) {
+      await updateDraftCommercial(draft.id, {price_override:null});
+      return;
+    }
+    const value = Number(trimmed.replace(",", "."));
+    if (!Number.isFinite(value) || value <= 0) throw new Error("Ingresá un precio mayor a cero.");
+    await updateDraftCommercial(draft.id, {price_override:value});
+  }
+
   async function validateAll() {
-    if (!batchId) return;
-    const result = await api<any>(`/api/drafts/batches/${batchId}/validate`, {method:"POST"});
-    await loadBatch(batchId);
-    const firstIssue = result.results?.flatMap((item:any) => item.errors || [])[0];
-    setMessage(
-      `${result.ready} borrador(es) listos y ${result.invalid} con observaciones después de validar el lote.` +
-      (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : "")
-    );
+    const ids = batchIds.length ? batchIds : (batchId ? [batchId] : []);
+    if (!ids.length) return;
+    setValidationProgress({active:true, scope:"all", message:"Preparando todos los borradores y verificando contratos, atributos, imágenes y precios…"});
+    try {
+      const results = await Promise.all(ids.map(id => api<any>(`/api/drafts/batches/${id}/validate`, {method:"POST"})));
+      setValidationProgress({active:true, scope:"all", message:"Mercado Libre respondió. Consolidando observaciones y actualizando cada borrador…"});
+      await loadBatches(ids);
+      const ready = results.reduce((sum, result) => sum + Number(result.ready || 0), 0);
+      const invalid = results.reduce((sum, result) => sum + Number(result.invalid || 0), 0);
+      const firstIssue = results.flatMap(result => result.results || []).flatMap((item:any) => item.errors || [])[0];
+      setMessage(
+        `${ready} borrador(es) listos y ${invalid} con observaciones después de validar la operación.` +
+        (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : "")
+      );
+    } finally {
+      setValidationProgress({active:false, scope:"all", message:""});
+    }
   }
 
   async function approveReady() {
-    if (!batchId) return;
-    const result = await api<any>(`/api/drafts/batches/${batchId}/approve-ready`, {method:"POST"});
-    await loadBatch(batchId);
-    setMessage(`${result.approved || 0} borrador(es) aprobados en una sola operación.`);
+    const ids = batchIds.length ? batchIds : (batchId ? [batchId] : []);
+    if (!ids.length) return;
+    const results = await Promise.all(ids.map(id => api<any>(`/api/drafts/batches/${id}/approve-ready`, {method:"POST"})));
+    await loadBatches(ids);
+    const approved = results.reduce((sum, result) => sum + Number(result.approved || 0), 0);
+    setMessage(`${approved} borrador(es) aprobados en toda la operación.`);
   }
 
   function watchJob(jobId: string) {
@@ -1537,15 +1720,18 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     if (!selectedApprovedDraftIds.length) {
       throw new Error("Seleccioná al menos un borrador APPROVED para publicar.");
     }
-    const result = await api<any>("/api/publication/jobs", {
+    const multi = (batchIds.length ? batchIds : (batchId ? [batchId] : [])).length > 1;
+    const result = await api<any>(multi ? "/api/publication/jobs/consolidated" : "/api/publication/jobs", {
       method:"POST",
-      body:JSON.stringify({batch_id: batchId, draft_ids: selectedApprovedDraftIds})
+      body:JSON.stringify(multi
+        ? {draft_ids: selectedApprovedDraftIds}
+        : {batch_id: batchId, draft_ids: selectedApprovedDraftIds})
     });
     setJob(result);
     trackedJobRef.current = result.job_id;
     if (accountId) window.localStorage.setItem(activeJobStorageKey(accountId), result.job_id);
     setResumeJobId(result.job_id);
-    setLastAction("Publicación iniciada. Consultá el progreso y el resultado.");
+    setLastAction("Publicación iniciada. Consultá el progreso por cuenta y el resultado consolidado.");
     setPublisherStep("execution");
     watchJob(result.job_id);
   }
@@ -1630,6 +1816,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     releaseEditLease();
     // The persisted job reference remains available for explicit recovery.
     setAccountId(nextAccountId);
+    setSelectedAccountIds(nextAccountId ? [nextAccountId] : []);
     setStartMode("");
     setMlaPreview(null);
     setMlaImportId("");
@@ -1663,6 +1850,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setQuantityPricingEnabled(false);
     setQuantityPrices([]);
     setQuantityPricingAnalysis(null);
+    setInstallmentIncrements({three:"0", six:"0"});
     setPricingAnalysis(null);
     setProductCost("0");
     setSimulationPackage({dimensions:"", weight:"", logisticType:"", shippingMode:"", freeShipping:""});
@@ -1701,6 +1889,13 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   function switchAccount(nextAccountId: string) {
     if (nextAccountId === accountId || !confirmDiscard()) return;
     resetPublicationState(nextAccountId);
+  }
+
+  function togglePublicationAccount(id: string) {
+    setSelectedAccountIds(current => {
+      if (id === accountId) return current.includes(id) ? current : [id, ...current];
+      return current.includes(id) ? current.filter(value => value !== id) : [...current, id];
+    });
   }
 
   async function run<T>(fn: () => Promise<T>) {
@@ -1870,8 +2065,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
           {([
             ["category", "Producto y categoría", contextComplete],
             ["technical", "Ficha técnica", productComplete],
-            ["prices", "Precios", Number(form.price) > 0],
-            ["shipping", "Logística", shippingReady],
+            ["prices", "Precio y logística", Number(form.price) > 0 && shippingReady],
             ["images", "Imágenes y lote", uploadedImages.length > 0],
             ["review", "Revisión", draftsComplete],
             ["execution", "Publicación", Boolean(terminalJob)],
@@ -1922,7 +2116,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
 
         <section className="workflowContext" aria-label="Estado de la publicación actual">
           <div><span>Producto actual</span><strong>{form.sku.trim() || "Sin SKU"}</strong></div>
-          <div><span>Etapa actual</span><strong>{({category:"Producto y categoría", technical:"Ficha técnica", prices:"Precios", shipping:"Logística", images:"Imágenes y lote", review:"Revisión", execution:"Publicación"} as const)[publisherStep]}</strong></div>
+          <div><span>Etapa actual</span><strong>{({category:"Producto y categoría", technical:"Ficha técnica", prices:"Precio y logística", images:"Imágenes y lote", review:"Revisión", execution:"Publicación"} as const)[publisherStep]}</strong></div>
           <div><span>Última acción</span><strong>{lastAction}</strong></div>
           <div><span>Último guardado</span><strong>{lastSavedAt || "Aún no guardada"}{dirty ? " · Cambios pendientes" : ""}</strong></div>
         </section>
@@ -1931,7 +2125,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
           <button type="button" className="secondary" onClick={()=>run(resumePreviousJob)}>Consultar trabajo anterior</button>
         </div>}
         <section className="summaryBar">
-          <div><span>Cuenta</span><b>{selectedAccount?.nickname || "Sin seleccionar"}</b></div>
+          <div><span>Cuentas</span><b>{publicationAccounts.length ? publicationAccounts.map(account => account.nickname).join(" · ") : "Sin seleccionar"}</b></div>
           <div><span>Categoría</span><b>{selectedCategoryName || "Sin seleccionar"}</b></div>
           <div><span>Ficha</span><b className={versionId ? "ok" : ""}>{versionId ? "Guardada" : "Pendiente"}</b></div>
           <div><span>Borradores</span><b>{drafts.length}</b></div>
@@ -1940,22 +2134,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
         
 
 
-        <div className="wizardNavigation" role="navigation" aria-label="Navegación de la ficha">
-          <div className="wizardNavigationHeading">
-            <strong>{({category: "Producto y categoría", technical: "Ficha técnica", prices: "Precios", shipping: "Logística", images: "Imágenes y lote", review: "Revisión", execution: "Publicación"} as const)[publisherStep]}</strong>
-            <span>Podés navegar libremente. Los campos conservan su contenido mientras cambiás de etapa.</span>
-          </div>
-          <div className="wizardNavigationActions">
-            <button type="button" className="secondary" disabled={publisherStep === "category"} onClick={() => setPublisherStep((current) => {
-              const steps = ["category", "technical", "prices", "shipping", "images", "review", "execution"] as const;
-              return steps[Math.max(0, steps.indexOf(current) - 1)];
-            })}>← Anterior</button>
-            <button type="button" disabled={publisherStep === "execution"} onClick={() => setPublisherStep((current) => {
-              const steps = ["category", "technical", "prices", "shipping", "images", "review", "execution"] as const;
-              return steps[Math.min(steps.length - 1, steps.indexOf(current) + 1)];
-            })}>Siguiente →</button>
-          </div>
-        </div>
+
 
         <section className="card" style={{display: publisherStep === "category" ? undefined : "none"}}>
           <div className="sectionTitle"><span>1</span> Producto y categoría</div>
@@ -1968,6 +2147,16 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
               {selectedAccount && <small className="helper">{selectedAccount.auth_status.replaceAll("_", " ")} · {selectedAccount.site_id}</small>}
             </label>
           </div>
+          {accountId && <div className="multiAccountSelector">
+            <div><b>Publicar también en</b><small>La cuenta principal se usa como referencia para categoría y pricing; cada cuenta seleccionada genera y valida sus propios borradores.</small></div>
+            <div className="multiAccountChoices">
+              {accounts.map(account => <label key={account.id} className={selectedAccountIds.includes(account.id) ? "selected" : ""}>
+                <input type="checkbox" checked={selectedAccountIds.includes(account.id)} disabled={account.id === accountId} onChange={()=>togglePublicationAccount(account.id)}/>
+                <span>{account.nickname}</span>
+              </label>)}
+            </div>
+            <small>{publicationAccounts.length} cuenta(s) · {Math.max(1, Number(form.count) || 1) * Math.max(1, publicationAccounts.length)} publicaciones planificadas.</small>
+          </div>}
 
           {accountId && <div className="publisherStartPanel">
             <div className="publisherStartHeader">
@@ -2076,8 +2265,8 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
           /></>}
         </section>
 
-        <section className={`card ${!contextComplete ? "locked" : ""}`} style={{display: ["technical", "prices", "shipping"].includes(publisherStep) ? undefined : "none"}}>
-          <div className="sectionTitle"><span>2</span> {publisherStep === "prices" ? "Precios y rentabilidad" : publisherStep === "shipping" ? "Logística y envíos" : "Ficha técnica"}</div>
+        <section className={`card ${!contextComplete ? "locked" : ""}`} style={{display: ["technical", "prices"].includes(publisherStep) ? undefined : "none"}}>
+          <div className="sectionTitle"><span>2</span> {publisherStep === "prices" ? "Precio y logística" : "Ficha técnica"}</div>
           <div style={{display: publisherStep === "technical" ? undefined : "none"}}>
           {(mlaPreview || technicalReuse) && <div className="technicalReusePanel">
             <div className="technicalReuseIntro">
@@ -2098,16 +2287,18 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
           </div>
           </div>
           <div style={{display: publisherStep === "prices" ? undefined : "none"}} className="wizardPricingMainPrice">
-            <label>Precio de venta ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>{setForm({...form,price:e.target.value});setPricingAnalysis(null);}}/></label>
+            <label>Precio clásico base ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>{setForm({...form,price:e.target.value});setPricingAnalysis(null);setLogisticsQuotes(null);}}/></label>
+            <label>Incremento 3 cuotas (%)<input disabled={!contextComplete} type="number" min="0" max="99" step="0.01" value={installmentIncrements.three} onChange={e=>setInstallmentIncrements(current=>({...current,three:e.target.value}))}/><small>Se aplica siempre sobre el precio clásico base.</small></label>
+            <label>Incremento 6 cuotas (%)<input disabled={!contextComplete} type="number" min="0" max="99" step="0.01" value={installmentIncrements.six} onChange={e=>setInstallmentIncrements(current=>({...current,six:e.target.value}))}/><small>No acumula el incremento de 3 cuotas.</small></label>
           </div>
-          <div style={{display: publisherStep === "shipping" ? undefined : "none"}}>
+          <div style={{display: publisherStep === "prices" ? undefined : "none"}}>
           <div className="publisherShippingContext">
             <div className="publisherContextHeader">
               <div><h3>Datos de envío</h3><p className="helper blockHelper">Estos datos describen el paquete y se reutilizan para publicación y cálculo de costos. No son parámetros económicos.</p></div>
             </div>
             <div className="grid2 shippingPackageGrid">
-              <label>Dimensiones del paquete (L×A×H, cm)<input disabled={!contextComplete} value={simulationPackage.dimensions} onChange={e=>{setSimulationPackage({...simulationPackage, dimensions:e.target.value});setPricingAnalysis(null);}} placeholder="30x20x10"/></label>
-              <label>Peso del paquete (kg)<input disabled={!contextComplete} type="number" min="0.01" step="0.01" value={simulationPackage.weight} onChange={e=>{setSimulationPackage({...simulationPackage, weight:e.target.value});setPricingAnalysis(null);}}/></label>
+              <label>Dimensiones del paquete (L×A×H, cm)<input disabled={!contextComplete} value={simulationPackage.dimensions} onChange={e=>{setSimulationPackage({...simulationPackage, dimensions:e.target.value});setPricingAnalysis(null);setLogisticsQuotes(null);}} placeholder="30x20x10"/></label>
+              <label>Peso del paquete (kg)<input disabled={!contextComplete} type="number" min="0.01" step="0.01" value={simulationPackage.weight} onChange={e=>{setSimulationPackage({...simulationPackage, weight:e.target.value});setPricingAnalysis(null);setLogisticsQuotes(null);}}/></label>
             </div>
             <div className="shippingPanel">
               <div className="shippingPanelHeader">
@@ -2119,13 +2310,28 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
                 <div className="shippingDecision">
                   <span>¿Ofrecer Mercado Envíos Flex?</span>
                   <div className="segmentedChoice" role="group" aria-label="Ofrecer Mercado Envíos Flex">
-                    <button type="button" className={simulationPackage.logisticType !== shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.base_logistic_type}));setPricingAnalysis(null);}}>No</button>
-                    <button type="button" disabled={!shippingCapabilities.flex_available} className={simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.flex_logistic_type}));setPricingAnalysis(null);}}>Sí</button>
+                    <button type="button" className={simulationPackage.logisticType !== shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.base_logistic_type}));setPricingAnalysis(null);setLogisticsQuotes(null);}}>No</button>
+                    <button type="button" disabled={!shippingCapabilities.flex_available} className={simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.flex_logistic_type}));setPricingAnalysis(null);setLogisticsQuotes(null);}}>Sí</button>
                   </div>
                   <small>{shippingCapabilities.flex_available ? "Flex está habilitado para esta cuenta y categoría." : "Mercado Libre no habilita Flex para este contexto."}</small>
                 </div>
-                <label>Quién paga el envío<select disabled={!contextComplete} value={simulationPackage.freeShipping} onChange={e=>{setSimulationPackage({...simulationPackage, freeShipping:e.target.value});setPricingAnalysis(null);}}><option value="">Elegí una opción</option><option value="false">El comprador paga</option><option value="true">Ofrecer envío gratis</option></select><small>Mercado Libre aplicará igualmente las reglas obligatorias de envío gratis cuando correspondan.</small></label>
+                <label>Quién paga el envío<select disabled={!contextComplete} value={simulationPackage.freeShipping} onChange={e=>{setSimulationPackage({...simulationPackage, freeShipping:e.target.value});setPricingAnalysis(null);setLogisticsQuotes(null);}}><option value="">Elegí una opción</option><option value="false">El comprador paga</option><option value="true">Ofrecer envío gratis</option></select><small>Mercado Libre aplicará igualmente las reglas obligatorias de envío gratis cuando correspondan.</small></label>
               </div>}
+            </div>
+            <div className="logisticsQuotePanel">
+              <div className="logisticsQuoteHeader">
+                <div><b>Costos logísticos reales</b><small>Flex y Mercado Envíos / Colecta se consultan por separado. Si Mercado Libre no devuelve un valor confiable se muestra “No disponible”.</small></div>
+                <button type="button" className="secondary" disabled={!shippingReady || !Number(form.price) || busy} onClick={()=>run(quoteLogistics)}>Cotizar logística</button>
+              </div>
+              {logisticsQuotes && <div className="logisticsQuoteGrid">
+                {[logisticsQuotes.quotes?.flex, logisticsQuotes.quotes?.collect].map((quote:any) => quote && <div key={quote.label} className={`logisticsQuoteCard ${quote.status === "AVAILABLE" ? "available" : "unavailable"}`}>
+                  <span>{quote.label}</span>
+                  <b>{quote.status === "AVAILABLE" ? money(quote.seller_cost) : "No disponible"}</b>
+                  {quote.status === "AVAILABLE" && <small>Costo bruto {money(quote.gross_cost)} · subsidio {money(quote.subsidy)}</small>}
+                  {quote.reason && <small>{quote.reason}</small>}
+                </div>)}
+              </div>}
+              <div className="pricingLogisticMode">Modalidad usada para pricing: <b>{shippingCapabilities && simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "Flex" : "Mercado Envíos / Colecta"}</b></div>
             </div>
           </div>
 
@@ -2141,6 +2347,16 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
               {activeCommercialAllocations.length > 1 && <label>Modalidad a analizar<select disabled={!contextComplete} value={pricingListingTypeId} onChange={e=>{setPricingListingTypeId(e.target.value);setPricingAnalysis(null);}}><option value="">Elegí una modalidad</option>{activeCommercialAllocations.map(option=><option key={option.listing_type_id} value={option.listing_type_id}>{option.listing_type_name}</option>)}</select><small>Este lote usa más de una modalidad de publicación.</small></label>}
               {activeCommercialAllocations.length === 1 && <div className="pricingResolvedContext"><span>Modalidad</span><b>{activeCommercialAllocations[0].listing_type_name}</b><small>Se toma automáticamente de la configuración del lote.</small></div>}
             </div>
+            {shippingCapabilities && <div className="pricingShippingSelector">
+              <div>
+                <b>Costo de envío usado en la cuenta</b>
+                <small>Elegí qué modalidad logística debe entrar como resta en el cálculo económico.</small>
+              </div>
+              <div className="segmentedChoice" role="group" aria-label="Modalidad logística para cálculo de precio">
+                <button type="button" className={simulationPackage.logisticType === shippingCapabilities.base_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.base_logistic_type}));setPricingAnalysis(null);}}>Mercado Envíos / Colecta</button>
+                <button type="button" disabled={!shippingCapabilities.flex_available} className={simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.flex_logistic_type}));setPricingAnalysis(null);}}>Flex</button>
+              </div>
+            </div>}
             <div className="pricingProposalActions">
               <button type="button" disabled={!contextComplete || !pricingConfigured || !Number(productCost) || busy} onClick={()=>run(simulateCurrentPrice)}>{busy ? "Calculando…" : "Calcular propuestas"}</button>
               <span>Usa la categoría, modalidad y logística ya cargadas en esta ficha.</span>
@@ -2153,6 +2369,25 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
                 <div><span>Cargo fijo ML</span><b>{money(pricingAnalysis.analyzed.fixed_fee || 0)}</b></div>
                 <div><span>Resultado por venta</span><b>{money(pricingAnalysis.analyzed.contribution_margin)}</b></div>
               </div>}
+              <div className="publisherPricingLedger" aria-label="Cuenta económica por venta">
+                <div className="publisherLedgerTitle">
+                  <div><b>Cuenta por venta</b><small>Detalle neto de ingresos y egresos usado por la calculadora.</small></div>
+                  <span>{shippingCapabilities && simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "Flex" : "Mercado Envíos / Colecta"}</span>
+                </div>
+                <div className="publisherLedgerRow income"><span className="sign">+</span><span>Precio neto sin IVA</span><b>{money(pricingAnalysis.analyzed.net_price || 0)}</b></div>
+                {[
+                  ["Costo del producto neto", pricingAnalysis.analyzed.net_cmv],
+                  ["Comisión Mercado Libre neta", pricingAnalysis.analyzed.ml_commission_net],
+                  ["Financiación Mercado Libre neta", pricingAnalysis.analyzed.financing_net],
+                  ["Cargo fijo Mercado Libre neto", pricingAnalysis.analyzed.ml_fixed_fee_net],
+                  ["Costo logístico neto", pricingAnalysis.analyzed.net_logistic_cost],
+                  ["Ingresos Brutos", pricingAnalysis.analyzed.iibb],
+                  ["Publicidad esperada", pricingAnalysis.analyzed.ads_expected],
+                  ["Reintegros esperados", pricingAnalysis.analyzed.refunds_expected],
+                  ["Otros costos configurados", pricingAnalysis.analyzed.additional_unit_cost_net],
+                ].filter(([,value])=>Math.abs(Number(value || 0)) >= 0.005).map(([label,value]) => <div className="publisherLedgerRow" key={String(label)}><span className="sign">−</span><span>{label}</span><b>{money(Number(value || 0))}</b></div>)}
+                <div className="publisherLedgerTotal"><span>=</span><div><b>Margen de contribución</b><small>{Number(pricingAnalysis.analyzed.contribution_margin_pct || 0).toFixed(2)}% del ingreso neto</small></div><strong>{money(pricingAnalysis.analyzed.contribution_margin || 0)}</strong></div>
+              </div>
               <div className="publisherPricingTargets">
                 {publisherPricingTargets(pricingAnalysis).map(option => <div key={option.key} className={`publisherPricingTarget${option.recommended ? " recommended" : ""}`}>
                   <div className="publisherPricingTargetHeader"><span>{option.label}</span>{option.recommended && <em>Recomendado</em>}</div>
@@ -2287,24 +2522,30 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             </div>}
           </>}
           </div>
-          <button
-            disabled={!contextComplete || categoryContractLoading || busy || (Boolean(batchId) && drafts.length > 0 && (!shippingReady || !requiredAttributesComplete))}
-            onClick={()=>run(batchId && drafts.length > 0 ? saveCorrectionsAndRevalidate : createProduct)}
-          >
-            {batchId && drafts.length > 0
-              ? "Guardar correcciones y revalidar lote"
-              : existingProduct ? "Guardar nueva versión" : "Guardar ficha"}
-          </button>
-          {(!shippingReady || !requiredAttributesComplete) && !(batchId && drafts.length > 0) && <p className="helper blockHelper" role="status">
+          {publisherStep === "prices" && <div className="saveProductFooter">
+            <div>
+              <b>Finalizar ficha</b>
+              <small>Guardá cuando termines ficha técnica, logística, calculadora y precios. Éste es el último paso antes de cargar imágenes.</small>
+            </div>
+            <button
+              disabled={!contextComplete || categoryContractLoading || busy || (Boolean(batchId) && drafts.length > 0 && (!shippingReady || !requiredAttributesComplete))}
+              onClick={()=>run(batchId && drafts.length > 0 ? saveCorrectionsAndRevalidate : createProduct)}
+            >
+              {batchId && drafts.length > 0
+                ? "Guardar correcciones y revalidar lote"
+                : existingProduct ? "Guardar nueva versión" : "Guardar ficha"}
+            </button>
+          </div>}
+          {publisherStep === "prices" && (!shippingReady || !requiredAttributesComplete) && !(batchId && drafts.length > 0) && <p className="helper blockHelper" role="status">
             Podés guardar la ficha y cargar imágenes aunque falten atributos obligatorios o Mercado Libre no haya confirmado la logística. Esos pendientes deberán resolverse antes de publicar.
           </p>}
-          {batchId && drafts.length > 0 && <p className="helper blockHelper">
+          {publisherStep === "prices" && batchId && drafts.length > 0 && <p className="helper blockHelper">
             Si la validación detecta un dato faltante, completalo acá y guardá las correcciones. La app crea un nuevo snapshot de la ficha, conserva los borradores e imágenes y vuelve a validar el lote sin recargar la página.
           </p>}
         </section>
 
         <section className={`card ${!productComplete ? "locked" : ""}`} style={{display: publisherStep === "images" ? undefined : "none"}}>
-          <div className="sectionTitle"><span>5</span> Imágenes y plan del lote</div>
+          <div className="sectionTitle"><span>4</span> Imágenes y plan del lote</div>
           {!productComplete && <div className="lockedMessage">Guardá la ficha maestra para definir el lote.</div>}
           <div className="grid2">
             <label>Imágenes
@@ -2319,11 +2560,41 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
                     : "Todavía no hay imágenes confirmadas por el backend"}
               </span>
             </label>
-            <label>Cantidad total de publicaciones
+            <label>Publicaciones por cuenta
               <input type="number" min="1" max="100" disabled={!versionId} value={form.count}
                 onChange={e=>setForm({...form,count:e.target.value})}/>
             </label>
           </div>
+
+          {uploadedImages.length > 0 && <>
+            <div className="imageDragHint">Arrastrá las miniaturas para definir el orden. La primera imagen queda como principal.</div>
+            <div className="imageManagerGrid" aria-label="Orden de imágenes">
+              {uploadedImages.map((image,index) => <div
+                className={`imageManagerCard ${index === 0 ? "principal" : ""} ${draggedImageId === image.id ? "dragging" : ""}`}
+                key={image.id}
+                draggable={!busy}
+                onDragStart={(event)=>{setDraggedImageId(image.id);event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",image.id);}}
+                onDragOver={(event)=>{event.preventDefault();event.dataTransfer.dropEffect="move";}}
+                onDrop={(event)=>{
+                  event.preventDefault();
+                  const rect = event.currentTarget.getBoundingClientRect();
+                  const placeAfter = event.clientX > rect.left + rect.width / 2;
+                  void run(()=>dropImageAt(image.id, placeAfter));
+                }}
+                onDragEnd={()=>setDraggedImageId(null)}
+              >
+                <div className="imageDragHandle" aria-hidden="true">⠿</div>
+                <div className="imageManagerPreview">
+                  <img src={`${BASE}/uploads/${image.id}`} alt={image.original_name}/>
+                  {index === 0 && <span>Principal</span>}
+                </div>
+                <div className="imageManagerMeta"><b>{index + 1}</b><small>{image.original_name}</small></div>
+                <div className="imageManagerActions">
+                  <button type="button" className="tiny dangerButton" disabled={busy} onClick={()=>run(()=>deleteUploadedImage(image.id))}>Eliminar</button>
+                </div>
+              </div>)}
+            </div>
+          </>}
 
           <div className="installmentBox">
             <div className="installmentHeader">
@@ -2360,7 +2631,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
         {drafts.length > 0 && <section className="card wide" style={{display: publisherStep === "review" ? undefined : "none"}}>
           <div className="toolbar">
             <div>
-              <div className="sectionTitle"><span>4</span> Revisión de borradores</div>
+              <div className="sectionTitle"><span>5</span> Revisión de borradores</div>
               <p className="sectionSubtitle">{drafts.length} publicaciones · {approvedCount} aprobadas · {selectedApprovedDraftIds.length} seleccionadas para publicar</p>
             </div>
             <div className="actions">
@@ -2383,12 +2654,18 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             </div>
             <small>Cache: {keywordIntelligence.cache_status || "-"} · Modelo semántico: {keywordIntelligence.semantic_model || "-"}</small>
           </div>}
+          <div className="b2bReviewPanel">
+            <div><span>Precio normal</span><b>{money(form.price)}</b></div>
+            {quantityPricingSnapshot().publishable.map((tier,index)=><div key={tier.min_purchase_unit}><span>Mayorista nivel {index + 1} · desde {tier.min_purchase_unit}</span><b>{money(tier.amount)}</b></div>)}
+            <div><span>Estado mayoristas</span><b className={quantityPricingEnabled && quantityPricingSnapshot().valid ? "ok" : "muted"}>{quantityPricingEnabled ? (quantityPricingSnapshot().valid ? "Listo para sincronizar" : "Pendiente") : "Sin configurar"}</b></div>
+          </div>
           <div className="tableWrap">
             <table>
-              <thead><tr><th>Publicar</th><th>#</th><th>Título</th><th>Chars</th><th>Modalidad</th><th>Score</th><th>Imgs</th><th>Estado</th><th>Acciones</th></tr></thead>
+              <thead><tr><th>Publicar</th><th>Cuenta</th><th>#</th><th>Título</th><th>Chars</th><th>Modalidad</th><th>Score</th><th>Imgs</th><th>Estado</th><th>Acciones</th></tr></thead>
               <tbody>
                 {drafts.map(d=><tr key={d.id}>
                   <td><input className="draftCheckbox" type="checkbox" checked={selectedDraftIds.includes(d.id)} disabled={d.status !== "APPROVED" || Boolean(job && !terminalJob)} onChange={()=>toggleDraftSelection(d.id)}/></td>
+                  <td><span className="accountPill">{d.account_nickname || accounts.find(account => account.id === d.account_id)?.nickname || "Cuenta"}</span></td>
                   <td>{d.sequence_number}</td>
                   <td className="titleCell">
                     {d.title}
@@ -2404,11 +2681,18 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
                     </div> : null}
                   </td>
                   <td><span className={d.title.length >= 54 ? "charCount good" : "charCount"}>{d.title.length}/60</span></td>
-                  <td><span className="installmentPill">{d.commercial_config?.commercial_label || d.commercial_config?.listing_type_name || "Mercado Libre"}</span></td>
+                  <td className="draftCommercialCell">
+                    <span className="installmentPill">{d.commercial_config?.commercial_label || d.commercial_config?.listing_type_name || "Mercado Libre"}</span>
+                    {String(d.commercial_config?.commercial_intent || "").includes("INSTALLMENTS") && <select value={d.commercial_config?.installments_count || ""} onChange={e=>run(()=>updateDraftCommercial(d.id,{installments_count:e.target.value ? Number(e.target.value) : null}))}>
+                      <option value="">Precio clásico</option><option value="3">3 cuotas</option><option value="6">6 cuotas</option>
+                    </select>}
+                    <small>{d.commercial_config?.price_override ? `Override ${money(d.commercial_config.price_override)}` : "Precio por regla"}</small>
+                  </td>
                   <td><strong>{d.score}</strong></td>
                   <td>{d.image_order.length}</td>
                   <td><span className={`pill ${d.status.toLowerCase()}`}>{d.status}</span></td>
                   <td className="rowActions">
+                    <button className="tiny secondary" onClick={()=>run(()=>editDraftPriceOverride(d))}>Precio</button>
                     <button className="tiny secondary" onClick={()=>run(()=>validateDraft(d.id))}>Validar</button>
                     {d.status==="READY" && <button className="tiny" onClick={()=>run(()=>approveDraft(d.id))}>Aprobar</button>}
                   </td>
@@ -2422,7 +2706,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
         {publisherStep === "execution" && !job && <div className="card wizardEmpty">Seleccioná y publicá borradores aprobados desde Revisión para ver la ejecución.</div>}
         {job && <section className="card" style={{display: publisherStep === "execution" ? undefined : "none"}}>
           <div className="toolbar executionHeader">
-            <div className="sectionTitle"><span>5</span> Ejecución</div>
+            <div className="sectionTitle"><span>6</span> Ejecución</div>
             {terminalJob && job.succeeded > 0 &&
               <button className="excelButton" onClick={()=>run(exportExcel)}>Descargar Excel MLA + SKU</button>}
           </div>
@@ -2459,7 +2743,39 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             </div>)}
           </div>}
         </section>}
+        <div className="wizardNavigation wizardNavigationBottom" role="navigation" aria-label="Navegación de la ficha">
+          <div className="wizardNavigationHeading">
+            <strong>{({category: "Producto y categoría", technical: "Ficha técnica", prices: "Precio y logística", images: "Imágenes y lote", review: "Revisión", execution: "Publicación"} as const)[publisherStep]}</strong>
+            <span>Terminá esta sección y continuá desde acá para mantener el flujo de trabajo de arriba hacia abajo.</span>
+          </div>
+          <div className="wizardNavigationActions">
+            <button type="button" className="secondary" disabled={publisherStep === "category"} onClick={() => setPublisherStep((current) => {
+              const steps = ["category", "technical", "prices", "images", "review", "execution"] as const;
+              return steps[Math.max(0, steps.indexOf(current) - 1)];
+            })}>← Anterior</button>
+            <button type="button" disabled={publisherStep === "execution"} onClick={() => setPublisherStep((current) => {
+              const steps = ["category", "technical", "prices", "images", "review", "execution"] as const;
+              return steps[Math.min(steps.length - 1, steps.indexOf(current) + 1)];
+            })}>Continuar →</button>
+          </div>
+        </div>
       </main>
+
+
+
+      {validationProgress.active && <div className="modalBackdrop progressBackdrop">
+        <div className="modal progressModal validationProgressModal">
+          <div className="spinner"/>
+          <h2>{validationProgress.scope === "all" ? "Validando lote" : "Validando borrador"}</h2>
+          <p>{validationProgress.message}</p>
+          <div className="progressSteps">
+            <span>Verificando ficha, atributos, logística, imágenes y configuración comercial</span>
+            <span>Ejecutando la prevalidación real contra Mercado Libre</span>
+            <span>Consolidando errores y advertencias antes de habilitar la aprobación</span>
+          </div>
+          <small>No mostramos porcentajes simulados: esta ventana permanece activa hasta recibir el resultado real del backend.</small>
+        </div>
+      </div>}
 
       {generationActive && <div className="modalBackdrop progressBackdrop">
         <div className="modal progressModal">

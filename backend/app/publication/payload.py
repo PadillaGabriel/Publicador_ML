@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from decimal import Decimal, InvalidOperation
 from typing import TYPE_CHECKING, Any
 
 from app.integrations.mercadolibre.product_identifiers import is_product_identifier, normalized_identifier_value
@@ -89,6 +90,47 @@ def family_name_for_version(version: ProductVersion) -> str:
     return " ".join((version.title_reference or "").split()).strip()
 
 
+def resolved_price_for_draft(version: ProductVersion, draft: PublicationDraft) -> Decimal:
+    """Resolve the publication price without mutating the shared product snapshot.
+
+    A manual per-publication override is authoritative. Otherwise 3/6-installment
+    increments are independently applied to the classic base price; percentages are
+    never accumulated across plans.
+    """
+    base = Decimal(str(version.price))
+    config = dict(getattr(draft, "commercial_config", None) or {})
+    override = config.get("price_override")
+    if override not in (None, ""):
+        try:
+            value = Decimal(str(override))
+        except (InvalidOperation, TypeError, ValueError) as exc:
+            raise ValueError("price_override must be numeric.") from exc
+        if value <= 0:
+            raise ValueError("price_override must be greater than zero.")
+        return value
+
+    installments = config.get("installments_count")
+    if installments in (None, "", 0, "0"):
+        return base
+    try:
+        count = int(installments)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("installments_count must be 3 or 6.") from exc
+    if count not in {3, 6}:
+        raise ValueError("installments_count must be 3 or 6.")
+
+    explicit = config.get("installment_increment_pct")
+    increments = (getattr(version, "commercial", None) or {}).get("installment_increments_pct") or {}
+    raw_pct = explicit if explicit not in (None, "") else increments.get(str(count), increments.get(count, 0))
+    try:
+        pct = Decimal(str(raw_pct or 0))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("installment increment percentage must be numeric.") from exc
+    if pct < 0 or pct >= 100:
+        raise ValueError("installment increment percentage must be between 0 and 100.")
+    return (base * (Decimal(1) + pct / Decimal(100))).quantize(Decimal("0.01"))
+
+
 def build_item_payload(
     version: ProductVersion,
     draft: PublicationDraft,
@@ -126,7 +168,7 @@ def build_item_payload(
         # family_name was required. The independent title remains on PublicationDraft.
         "family_name": family_name_for_draft(version, draft),
         "category_id": version.category_id,
-        "price": float(version.price),
+        "price": float(resolved_price_for_draft(version, draft)),
         "currency_id": version.currency_id,
         "available_quantity": version.quantity,
         "buying_mode": version.commercial.get("buying_mode", "buy_it_now"),

@@ -73,6 +73,18 @@ class PackageInput(BaseModel):
     free_shipping: bool | None = None
 
 
+class LogisticsQuotesRequest(BaseModel):
+    account_id: UUID
+    category_id: str = Field(min_length=1, max_length=40)
+    listing_type_id: str = Field(min_length=1, max_length=40)
+    item_price: Decimal = Field(gt=0)
+    dimensions: str = Field(min_length=3, max_length=120)
+    weight: Decimal = Field(gt=0, description="Peso en kilogramos")
+    free_shipping: bool
+    condition: str = Field(default="new", min_length=1, max_length=40)
+    currency_id: str = Field(default="ARS", min_length=3, max_length=10)
+
+
 class PricingSimulationRequest(BaseModel):
     """Temporary publisher contract backed by the pricing application service."""
 

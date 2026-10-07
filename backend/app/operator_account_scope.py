@@ -132,6 +132,20 @@ def scope_operation(db: Session, user: OperatorUser, path: str, method: str,
         return
     if path.startswith("/api/accounts"):
         raise HTTPException(status_code=403, detail="Solo administración puede gestionar cuentas")
+    if path.startswith("/api/pricing"):
+        account_id = data.get("account_id") or query.get("account_id")
+        if account_id:
+            ensure_account(db, user, account_id)
+        return
+    if path.startswith("/api/catalog"):
+        account_id = data.get("account_id") or query.get("account_id")
+        if account_id:
+            ensure_account(db, user, account_id)
+        return
+    if path.startswith("/api/manager"):
+        # Read models apply ownership/account scope in SQL. Mutating manager routes
+        # additionally validate the concrete publication before writing.
+        return
     if path.startswith("/api/publication-import"):
         if method == "POST" and parts[2:] in (["mla"], ["mla", "reuse"]):
             ensure_account(db, user, data.get("account_id"))
@@ -141,6 +155,17 @@ def scope_operation(db: Session, user: OperatorUser, path: str, method: str,
         if path == "/api/drafts/generate" and method == "POST":
             ensure_account(db, user, data.get("account_id"))
             ensure_product(db, user, version_product(db, data.get("product_version_id")))
+        elif path == "/api/drafts/generate-multi" and method == "POST":
+            for account_id in data.get("account_ids") or []:
+                ensure_account(db, user, account_id)
+            ensure_product(db, user, version_product(db, data.get("product_version_id")))
+        elif path == "/api/drafts/batches/multi-product-correction" and method == "POST":
+            batch_ids = data.get("batch_ids") or []
+            if not batch_ids:
+                raise HTTPException(status_code=422, detail="Indicá al menos un lote")
+            ensure_accounts(db, user, {batch_account(db, batch_id) for batch_id in batch_ids})
+            ensure_products(db, user, {batch_product(db, batch_id) for batch_id in batch_ids})
+            return
         elif len(parts) >= 4 and parts[2] == "batches":
             ensure_account(db, user, batch_account(db, parts[3]))
             ensure_product(db, user, batch_product(db, parts[3]))
@@ -160,6 +185,15 @@ def scope_operation(db: Session, user: OperatorUser, path: str, method: str,
         elif path == "/api/publication/jobs" and method == "POST":
             ensure_account(db, user, batch_account(db, data.get("batch_id")))
             ensure_product(db, user, batch_product(db, data.get("batch_id")))
+        elif path == "/api/publication/jobs/consolidated" and method == "POST":
+            draft_ids = data.get("draft_ids") or []
+            if not draft_ids:
+                raise HTTPException(status_code=422, detail="Seleccioná al menos un borrador")
+            ensure_accounts(db, user, {draft_account(db, draft_id) for draft_id in draft_ids})
+            ensure_products(db, user, {draft_product(db, draft_id) for draft_id in draft_ids})
+        elif len(parts) == 5 and parts[2] == "publications" and parts[4] == "retry-b2b" and method == "POST":
+            # Publication retry is authorized by its persisted draft/account in the handler.
+            return
         elif len(parts) == 5 and parts[2] == "drafts" and parts[4] == "dry-run" and method == "GET":
             ensure_account(db, user, draft_account(db, parts[3]))
             ensure_product(db, user, draft_product(db, parts[3]))
@@ -195,7 +229,7 @@ def scope_operation(db: Session, user: OperatorUser, path: str, method: str,
             if query.get("account_id"):
                 ensure_account(db, user, query["account_id"])
             return
-        if len(parts) in (5, 6) and parts[2] == "versions" and parts[4] == "images" and method == "POST":
+        if len(parts) in (5, 6) and parts[2] == "versions" and parts[4] == "images" and method in ("POST", "PUT", "DELETE"):
             return
         raise HTTPException(status_code=403, detail="Ruta de ficha sin control de propiedad")
     if path == "/api/title-intelligence/generate" and method == "POST":

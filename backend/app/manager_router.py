@@ -7,18 +7,103 @@ claims to list seller items that have not been imported or created by this app.
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from app.accounts.service import load_access_token
+from app.audit.service import audit
 from app.core.db import get_db
 from app.identity import OperatorAccountGrant, OperatorUser
 from app.operator_auth import request_identity
+from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
 from app.persistence import (
     AuditEvent, DraftBatch, Job, JobItem, MercadoLibreAccount, ProductMaster,
     ProductVersion, Publication, PublicationDraft,
 )
 
 router = APIRouter(prefix="/api/manager", tags=["manager"])
+
+
+UPDATABLE_ITEM_FIELDS = {"price", "available_quantity", "status"}
+
+
+class PublicationChangeSet(BaseModel):
+    price: float | None = Field(default=None, gt=0)
+    available_quantity: int | None = Field(default=None, ge=0)
+    status: str | None = Field(default=None, max_length=40)
+
+    @model_validator(mode="after")
+    def validate_non_empty(self):
+        if not self.model_dump(exclude_none=True):
+            raise ValueError("Indicá al menos un campo para actualizar.")
+        return self
+
+
+class PublicationUpdateConfirm(BaseModel):
+    expected: dict = Field(default_factory=dict)
+    changes: PublicationChangeSet
+
+
+class PublicationBulkUpdateItem(PublicationUpdateConfirm):
+    publication_id: uuid.UUID
+
+
+class PublicationBulkUpdate(BaseModel):
+    items: list[PublicationBulkUpdateItem] = Field(min_length=1, max_length=100)
+
+
+def _managed_publication_context(db: Session, actor: OperatorUser, publication_id: uuid.UUID):
+    columns = (Publication, PublicationDraft, DraftBatch, ProductVersion, ProductMaster, MercadoLibreAccount)
+    stmt = (select(*columns)
+        .join(PublicationDraft, PublicationDraft.id == Publication.draft_id)
+        .join(DraftBatch, DraftBatch.id == PublicationDraft.batch_id)
+        .join(ProductVersion, ProductVersion.id == DraftBatch.product_version_id)
+        .join(ProductMaster, ProductMaster.id == ProductVersion.product_master_id)
+        .join(MercadoLibreAccount, MercadoLibreAccount.id == Publication.account_id)
+        .where(Publication.id == publication_id))
+    row = db.execute(_scope_publications(stmt, actor)).first()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Publicación inexistente o no autorizada")
+    return row
+
+
+def _current_item_fields(item: dict) -> dict:
+    return {field: item.get(field) for field in UPDATABLE_ITEM_FIELDS}
+
+
+def _normalized_changes(changes: PublicationChangeSet) -> dict:
+    payload = changes.model_dump(exclude_none=True)
+    if "status" in payload:
+        payload["status"] = str(payload["status"]).strip().lower()
+    return payload
+
+
+def _preview_changes(current: dict, changes: dict) -> list[dict]:
+    return [
+        {"field": field, "old": current.get(field), "new": value}
+        for field, value in changes.items()
+        if current.get(field) != value
+    ]
+
+
+def _check_expected(current: dict, expected: dict) -> None:
+    relevant = {key: value for key, value in expected.items() if key in UPDATABLE_ITEM_FIELDS}
+    conflicts = {
+        key: {"expected": value, "current": current.get(key)}
+        for key, value in relevant.items()
+        if current.get(key) != value
+    }
+    if conflicts:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PUBLICATION_CHANGED_SINCE_PREVIEW",
+                "message": "Mercado Libre cambió desde la vista previa. Volvé a revisar antes de confirmar.",
+                "conflicts": conflicts,
+            },
+        )
+
 
 
 def _scope_publications(statement, actor: OperatorUser):
@@ -66,6 +151,7 @@ def list_publications(
         stmt = stmt.where(or_(
             ProductMaster.internal_sku.ilike(pattern, escape="\\"),
             Publication.item_id.ilike(pattern, escape="\\"),
+            Publication.user_product_id.ilike(pattern, escape="\\"),
             PublicationDraft.title.ilike(pattern, escape="\\"),
         ))
     if account_id is not None:
@@ -91,6 +177,8 @@ def list_publications(
             "account_nickname": account.nickname,
             "batch_id": str(batch.id),
             "draft_id": str(draft.id),
+            "internal_price": float(version.price),
+            "b2b_sync": (publication.external_response or {}).get("_quantity_price_sync") or {"status": "SIN_CONFIGURAR"},
             "published_at": publication.published_at.isoformat() if publication.published_at else None,
         } for publication, draft, batch, version, product, account in rows],
     }
@@ -147,6 +235,162 @@ def list_jobs(
             "created_at": job.created_at.isoformat(),
             "finished_at": job.finished_at.isoformat() if job.finished_at else None,
         } for job in jobs],
+    }
+
+
+@router.post("/publications/{publication_id}/preview-update")
+def preview_publication_update(
+    publication_id: uuid.UUID,
+    changes: PublicationChangeSet,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    actor, _ = request_identity(db, request)
+    publication, _draft, _batch, _version, _product, account = _managed_publication_context(
+        db, actor, publication_id
+    )
+    if not publication.item_id:
+        raise HTTPException(status_code=409, detail="La publicación todavía no tiene MLA.")
+    client = MercadoLibreClient(load_access_token(db, account.id))
+    try:
+        item = client.item(publication.item_id)
+    except MercadoLibreError as exc:
+        raise HTTPException(status_code=502, detail="No se pudo leer el estado actual de Mercado Libre.") from exc
+    current = _current_item_fields(item)
+    desired = _normalized_changes(changes)
+    return {
+        "publication_id": str(publication.id),
+        "item_id": publication.item_id,
+        "account_id": str(account.id),
+        "expected": current,
+        "changes": _preview_changes(current, desired),
+        "has_changes": bool(_preview_changes(current, desired)),
+    }
+
+
+def _apply_publication_update(
+    db: Session, actor: OperatorUser, publication_id: uuid.UUID, payload: PublicationUpdateConfirm
+) -> dict:
+    publication, draft, batch, version, product, account = _managed_publication_context(
+        db, actor, publication_id
+    )
+    if not publication.item_id:
+        raise HTTPException(status_code=409, detail="La publicación todavía no tiene MLA.")
+    client = MercadoLibreClient(load_access_token(db, account.id))
+    desired = _normalized_changes(payload.changes)
+    try:
+        before_item = client.item(publication.item_id)
+    except MercadoLibreError as exc:
+        raise HTTPException(status_code=502, detail="No se pudo validar el estado actual de Mercado Libre.") from exc
+    before = _current_item_fields(before_item)
+    _check_expected(before, payload.expected)
+    actual_changes = {key: value for key, value in desired.items() if before.get(key) != value}
+    if not actual_changes:
+        return {
+            "publication_id": str(publication.id),
+            "item_id": publication.item_id,
+            "status": "NO_CHANGES",
+            "before": before,
+            "after": before,
+        }
+    try:
+        write = client.update_item(publication.item_id, actual_changes)
+        after_item = client.item(publication.item_id)
+    except MercadoLibreError as exc:
+        audit(
+            db, "PUBLICATION_UPDATE_FAILED", "Publication", str(publication.id),
+            {
+                "item_id": publication.item_id,
+                "account_id": str(account.id),
+                "requested_changes": actual_changes,
+                "error": str(exc),
+            },
+            actor_user_id=actor.id,
+        )
+        db.commit()
+        raise HTTPException(status_code=502, detail="Mercado Libre rechazó la actualización.") from exc
+    after = _current_item_fields(after_item)
+    mismatches = {
+        key: {"requested": value, "actual": after.get(key)}
+        for key, value in actual_changes.items()
+        if after.get(key) != value
+    }
+    event = "PUBLICATION_UPDATED" if not mismatches else "PUBLICATION_UPDATE_VERIFICATION_FAILED"
+    audit(
+        db, event, "Publication", str(publication.id),
+        {
+            "item_id": publication.item_id,
+            "account_id": str(account.id),
+            "product_id": str(product.id),
+            "batch_id": str(batch.id),
+            "draft_id": str(draft.id),
+            "before": before,
+            "requested": actual_changes,
+            "after": after,
+            "http_status": write.status_code,
+            "mismatches": mismatches,
+        },
+        actor_user_id=actor.id,
+    )
+    db.commit()
+    if mismatches:
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "code": "PUBLICATION_UPDATE_NOT_CONFIRMED",
+                "message": "Mercado Libre respondió la actualización pero la lectura posterior no confirmó todos los cambios.",
+                "mismatches": mismatches,
+            },
+        )
+    return {
+        "publication_id": str(publication.id),
+        "item_id": publication.item_id,
+        "status": "UPDATED",
+        "before": before,
+        "after": after,
+        "changes": actual_changes,
+    }
+
+
+@router.post("/publications/{publication_id}/apply-update")
+def apply_publication_update(
+    publication_id: uuid.UUID,
+    payload: PublicationUpdateConfirm,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    actor, _ = request_identity(db, request)
+    return _apply_publication_update(db, actor, publication_id, payload)
+
+
+@router.post("/bulk/publications/update")
+def bulk_publication_update(
+    payload: PublicationBulkUpdate, request: Request, db: Session = Depends(get_db)
+):
+    actor, _ = request_identity(db, request)
+    results: list[dict] = []
+    for item in payload.items:
+        try:
+            result = _apply_publication_update(
+                db, actor, item.publication_id,
+                PublicationUpdateConfirm(expected=item.expected, changes=item.changes),
+            )
+            results.append({"publication_id": str(item.publication_id), "ok": True, "result": result})
+        except HTTPException as exc:
+            db.rollback()
+            results.append({
+                "publication_id": str(item.publication_id),
+                "ok": False,
+                "status_code": exc.status_code,
+                "error": exc.detail,
+            })
+    succeeded = sum(1 for result in results if result["ok"])
+    return {
+        "status": "COMPLETED" if succeeded == len(results) else "PARTIAL" if succeeded else "FAILED",
+        "total": len(results),
+        "succeeded": succeeded,
+        "failed": len(results) - succeeded,
+        "results": results,
     }
 
 

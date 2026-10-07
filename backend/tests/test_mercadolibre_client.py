@@ -174,3 +174,76 @@ def test_item_description_uses_official_description_endpoint(monkeypatch):
 
     assert result == {"plain_text": "Descripción importada"}
     assert seen == {"method": "GET", "path": "/items/MLA123/description"}
+
+
+def test_sync_item_description_updates_when_description_exists(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(200, json={"plain_text": "Anterior"}, request=request)
+        if request.method == "PUT":
+            return httpx.Response(200, json={"plain_text": "Nueva"}, request=request)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
+
+    _use_transport(monkeypatch, handler)
+    response = MercadoLibreClient("token").sync_item_description("MLA123", "Nueva")
+
+    assert response.status_code == 200
+    assert seen == [
+        ("GET", "/items/MLA123/description"),
+        ("PUT", "/items/MLA123/description"),
+    ]
+
+
+def test_sync_item_description_creates_when_description_is_missing(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(404, json={"message": "not found"}, request=request)
+        if request.method == "POST":
+            return httpx.Response(201, json={"plain_text": "Nueva"}, request=request)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
+
+    _use_transport(monkeypatch, handler)
+    response = MercadoLibreClient("token").sync_item_description("MLA123", "Nueva")
+
+    assert response.status_code == 201
+    assert seen == [
+        ("GET", "/items/MLA123/description"),
+        ("POST", "/items/MLA123/description"),
+    ]
+
+
+def test_sync_item_description_recovers_from_post_create_race(monkeypatch):
+    seen = []
+
+    def handler(request):
+        seen.append((request.method, request.url.path))
+        if request.method == "GET":
+            return httpx.Response(404, json={"message": "not found"}, request=request)
+        if request.method == "POST":
+            return httpx.Response(
+                400,
+                json={
+                    "message": "Item already has a description, use PUT instead",
+                    "error": "item.description.invalid",
+                },
+                request=request,
+            )
+        if request.method == "PUT":
+            return httpx.Response(200, json={"plain_text": "Nueva"}, request=request)
+        raise AssertionError(f"Unexpected request: {request.method} {request.url.path}")
+
+    _use_transport(monkeypatch, handler)
+    response = MercadoLibreClient("token").sync_item_description("MLA123", "Nueva")
+
+    assert response.status_code == 200
+    assert seen == [
+        ("GET", "/items/MLA123/description"),
+        ("POST", "/items/MLA123/description"),
+        ("PUT", "/items/MLA123/description"),
+    ]

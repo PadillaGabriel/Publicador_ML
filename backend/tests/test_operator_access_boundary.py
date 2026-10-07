@@ -28,3 +28,10 @@ def test_api_without_session_is_denied_before_handler():
         result = asyncio.run(operator_access_middleware(request, next_handler))
     assert result.status_code == 401
     assert not called
+
+
+def test_manager_mutations_use_publication_permission():
+    assert required_action('/api/manager/publications/abc/preview-update', 'POST') == 'publish'
+    assert required_action('/api/manager/publications/abc/apply-update', 'POST') == 'publish'
+    assert required_action('/api/manager/bulk/publications/update', 'POST') == 'publish'
+    assert required_action('/api/manager/publications', 'GET') is None

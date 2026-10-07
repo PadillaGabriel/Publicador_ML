@@ -5,15 +5,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from app.accounts.service import load_access_token
+from app.core.config import get_settings
 from app.core.db import get_db
 from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
 from app.persistence import MercadoLibreAccount
 from app.pricing.application.calculator import PricingCalculatorService
+from app.publication.shipping import fetch_shipping_capabilities, ShippingCapabilityError
 from app.pricing.domain import PricingDomainError
 from app.pricing.infrastructure.cache import PricingSimulationCache
-from app.pricing.infrastructure.mercadolibre import MercadoLibrePricingProvider
+from app.pricing.infrastructure.mercadolibre import MarketplaceSimulationContext, MercadoLibrePricingProvider
 from app.pricing.schemas import (
     ExistingListingPricingRequest,
+    LogisticsQuotesRequest,
     NewProductPricingRequest,
     PricingCalculatorResponse,
     PricingProfileUpsert,
@@ -29,7 +32,11 @@ from app.pricing.service import (
 
 logger = logging.getLogger("pricing")
 router = APIRouter(prefix="/api/pricing", tags=["pricing"])
-_pricing_simulation_cache = PricingSimulationCache()
+_settings = get_settings()
+_pricing_simulation_cache = PricingSimulationCache(
+    max_entries=_settings.pricing_cache_max_entries,
+    ttl_seconds=_settings.pricing_cache_ttl_seconds,
+)
 
 
 def build_calculator_service(db: Session, account_id: UUID | None) -> PricingCalculatorService:
@@ -102,6 +109,78 @@ def profile(channel: str = Query(default="MERCADOLIBRE"), db: Session = Depends(
 @router.put("/profile")
 def save_profile(payload: PricingProfileUpsert, db: Session = Depends(get_db)):
     return serialize_profile(upsert_default_profile(db, payload))
+
+
+@router.post("/logistics-quotes")
+def logistics_quotes(payload: LogisticsQuotesRequest, db: Session = Depends(get_db)):
+    account = db.get(MercadoLibreAccount, payload.account_id)
+    if account is None or not account.active or not account.seller_id:
+        raise HTTPException(status_code=404, detail="Cuenta de Mercado Libre no encontrada o sin seller_id.")
+    token = load_access_token(db, account.id)
+    client = MercadoLibreClient(token)
+    try:
+        capabilities = fetch_shipping_capabilities(
+            client, seller_id=account.seller_id, category_id=payload.category_id
+        )
+    except (ShippingCapabilityError, MercadoLibreError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail={"code": "LOGISTICS_CAPABILITIES_UNAVAILABLE", "message": str(exc)},
+        ) from exc
+
+    provider = MercadoLibrePricingProvider(
+        client, seller_id=account.seller_id, cache=_pricing_simulation_cache
+    )
+    weight_grams = PricingCalculatorService._billable_weight_in_grams(payload.weight)
+
+    def quote(label: str, logistic_type: str | None) -> dict:
+        if not logistic_type:
+            return {"label": label, "status": "NOT_AVAILABLE", "logistic_type": None}
+        context = MarketplaceSimulationContext(
+            account_id=payload.account_id,
+            site_id=account.site_id or "MLA",
+            category_id=payload.category_id,
+            listing_type_id=payload.listing_type_id,
+            currency_id=payload.currency_id,
+            logistic_type=logistic_type,
+            shipping_mode=capabilities.mode,
+            dimensions=payload.dimensions,
+            package_weight_grams=weight_grams,
+            free_shipping=payload.free_shipping,
+            condition=payload.condition,
+        )
+        try:
+            result = provider._shipping_quote(context, payload.item_price)
+        except PricingDomainError as exc:
+            return {
+                "label": label,
+                "status": "NOT_AVAILABLE",
+                "logistic_type": logistic_type,
+                "reason": str(exc),
+            }
+        return {
+            "label": label,
+            "status": "AVAILABLE",
+            "logistic_type": logistic_type,
+            "shipping_mode": capabilities.mode,
+            "gross_cost": float(result.gross_cost),
+            "subsidy": float(result.subsidy),
+            "seller_cost": float(result.gross_cost - result.subsidy),
+            "billable_weight": float(result.billable_weight),
+            "currency_id": payload.currency_id,
+        }
+
+    base_type = capabilities.base_logistic_type
+    flex_type = capabilities.flex_logistic_type if capabilities.flex_available else None
+    return {
+        "account_id": str(account.id),
+        "category_id": payload.category_id,
+        "mode": capabilities.mode,
+        "quotes": {
+            "collect": quote("Mercado Envíos / Colecta", base_type),
+            "flex": quote("Flex", flex_type),
+        },
+    }
 
 
 @router.post("/simulate", response_model=PricingCalculatorResponse)
