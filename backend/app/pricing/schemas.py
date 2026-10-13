@@ -33,11 +33,14 @@ class CostComponentInput(BaseModel):
 
 
 class PricingProfileUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     name: str = Field(default="Mercado Libre", min_length=1, max_length=120)
     channel: str = Field(default="MERCADOLIBRE", min_length=1, max_length=40)
     currency_id: str = Field(default="ARS", min_length=3, max_length=10)
     target_margin_pct: Decimal = Field(default=Decimal("20"), ge=0, lt=100)
     minimum_margin_pct: Decimal = Field(default=Decimal("10"), ge=0, lt=100)
+    installment_3_markup_pct: Decimal = Field(default=Decimal("0"), ge=0, lt=100)
+    installment_6_markup_pct: Decimal = Field(default=Decimal("0"), ge=0, lt=100)
     vat_rate_pct: Decimal = Field(default=Decimal("21"), ge=0, lt=100)
     iibb_rate_pct: Decimal = Field(default=Decimal("0"), ge=0, lt=100)
     ads_rate_pct: Decimal = Field(default=Decimal("0"), ge=0, lt=100)
@@ -77,9 +80,9 @@ class LogisticsQuotesRequest(BaseModel):
     account_id: UUID
     category_id: str = Field(min_length=1, max_length=40)
     listing_type_id: str = Field(min_length=1, max_length=40)
-    item_price: Decimal = Field(gt=0)
-    dimensions: str = Field(min_length=3, max_length=120)
-    weight: Decimal = Field(gt=0, description="Peso en kilogramos")
+    sale_price: Decimal = Field(gt=0)
+    dimensions: str = Field(min_length=1, max_length=120)
+    weight: Decimal = Field(gt=0)
     free_shipping: bool
     condition: str = Field(default="new", min_length=1, max_length=40)
     currency_id: str = Field(default="ARS", min_length=3, max_length=10)
@@ -140,6 +143,7 @@ class ExistingListingPricingRequest(BaseModel):
     mla_id: str | None = Field(default=None, max_length=80)
     sku: str | None = Field(default=None, max_length=120)
     gross_cmv: Decimal | None = Field(default=None, ge=0)
+    sale_price: Decimal | None = Field(default=None, gt=0)
     target_margin_pct: Decimal | None = Field(default=None, ge=0, lt=100)
     overrides: EconomicOverrides = Field(default_factory=EconomicOverrides)
 

@@ -18,7 +18,6 @@ from app.persistence import (
 )
 from app.publication.errors import build_mercadolibre_error
 from app.publication.payload import build_item_payload, publication_title_intent
-from app.publication.payload import resolved_price_for_draft
 from app.publication.quantity_pricing import (
     QuantityPricingSyncError,
     normalize_b2b_quantity_prices,
@@ -217,10 +216,10 @@ def _sync_description(db, *, client: MercadoLibreClient, publication: Publicatio
         return True, False
 
     try:
-        response = client.sync_item_description(publication.item_id, description)
+        response = client.create_item_description(publication.item_id, description)
         _set_description_sync(
             publication,
-            status="PUBLISHED",
+            status="SYNCED",
             detail={"http_status": response.status_code},
         )
         db.commit()
@@ -233,9 +232,7 @@ def _sync_description(db, *, client: MercadoLibreClient, publication: Publicatio
         _set_description_sync(
             publication,
             status="FAILED",
-            detail={"updated_at": utcnow().isoformat(), "mla": publication.item_id,
-                    "account_id": str(publication.account_id), "draft_id": str(draft.id),
-                    "http_status": exc.status_code, "error": error},
+            detail={"http_status": exc.status_code, "error": error},
         )
         attempt.outcome = "DESCRIPTION_FAILED"
         attempt.http_status = exc.status_code
@@ -272,8 +269,7 @@ def _sync_quantity_prices(
     db, *, client: MercadoLibreClient, publication: Publication, version: ProductVersion, draft: PublicationDraft
 ) -> dict | None:
     commercial = version.commercial or {}
-    publication_price = resolved_price_for_draft(version, draft)
-    tiers = normalize_b2b_quantity_prices(commercial, base_price=publication_price)
+    tiers = normalize_b2b_quantity_prices(commercial, base_price=version.price)
     if not tiers:
         draft_tiers = commercial.get("quantity_prices_draft") or []
         _set_quantity_price_sync(
@@ -286,7 +282,7 @@ def _sync_quantity_prices(
         db.commit()
         return {"code": "QUANTITY_PRICE_DRAFT_INCOMPLETE",
                 "message": "Los precios mayoristas siguen en borrador y no fueron enviados."} if draft_tiers else None
-    if _quantity_price_sync_status(publication) in {"SYNCED", "PUBLISHED"}:
+    if _quantity_price_sync_status(publication) == "PUBLISHED":
         return None
 
     try:
@@ -295,16 +291,12 @@ def _sync_quantity_prices(
             item_id=publication.item_id,
             tiers=tiers,
             currency_id=version.currency_id,
-            base_price=publication_price,
+            base_price=version.price,
         )
         _set_quantity_price_sync(
             publication,
             status="PUBLISHED",
             detail={
-                "updated_at": utcnow().isoformat(),
-                "mla": publication.item_id,
-                "account_id": str(publication.account_id),
-                "draft_id": str(draft.id),
                 "http_status": result["http_status"],
                 "model": "discount_percentage",
                 "price_version": result["version"],
@@ -314,8 +306,10 @@ def _sync_quantity_prices(
                     for row in tiers
                 ],
                 "price_per_quantity": result["request"].get("price_per_quantity") or [],
-                "verified": result.get("verified") or [],
+                "verified": bool(result.get("verified")),
                 "verified_version": result.get("verified_version"),
+                "verified_price_per_quantity": result.get("verified_price_per_quantity") or [],
+                "verified_at": utcnow().isoformat(),
             },
         )
         db.commit()
@@ -333,8 +327,7 @@ def _sync_quantity_prices(
         _set_quantity_price_sync(
             publication,
             status="FAILED",
-            detail={"updated_at": utcnow().isoformat(), "mla": publication.item_id,
-                    "account_id": str(publication.account_id), "draft_id": str(draft.id), "error": error},
+            detail={"error": error},
         )
         db.commit()
         logger.warning(

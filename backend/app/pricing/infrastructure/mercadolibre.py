@@ -223,6 +223,14 @@ class MercadoLibrePricingProvider:
             free_shipping=context.free_shipping,
         )
 
+    def quote_shipping(
+        self,
+        context: MarketplaceSimulationContext,
+        gross_price: Decimal,
+    ) -> ProspectiveShippingQuote:
+        """Return one real seller shipping quote without inferring another logistics mode."""
+        return self._shipping_quote(context, gross_price)
+
     def _shipping_quote(
         self,
         context: MarketplaceSimulationContext,

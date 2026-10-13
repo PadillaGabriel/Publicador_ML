@@ -640,21 +640,496 @@ aside .status {position:static;margin-top:auto;padding:22px 7px 0;line-height:1.
 .managerPager button {width: auto;}
 @media (max-width: 800px) {.managerHeader {flex-direction: column;} .managerFilters label {min-width: 100%;}}
 
-/* Consolidated enterprise workflow */
-.multiAccountSelector{margin:14px 0;padding:14px;border:1px solid var(--line,#d8dee8);border-radius:12px;display:grid;gap:10px}.multiAccountSelector>div:first-child{display:flex;flex-direction:column;gap:3px}.multiAccountChoices{display:flex;flex-wrap:wrap;gap:8px}.multiAccountChoices label{display:flex;align-items:center;gap:7px;padding:8px 11px;border:1px solid var(--line,#d8dee8);border-radius:10px;cursor:pointer}.multiAccountChoices label.selected{border-color:#4f6bed;background:rgba(79,107,237,.08)}
-.logisticsQuotePanel{margin-top:14px;padding:14px;border:1px solid var(--line,#d8dee8);border-radius:12px}.logisticsQuoteHeader{display:flex;justify-content:space-between;gap:12px;align-items:center}.logisticsQuoteHeader>div{display:flex;flex-direction:column;gap:4px}.logisticsQuoteGrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;margin-top:12px}.logisticsQuoteCard{padding:12px;border:1px solid var(--line,#d8dee8);border-radius:10px;display:flex;flex-direction:column;gap:4px}.logisticsQuoteCard b{font-size:1.1rem}.logisticsQuoteCard.unavailable{opacity:.72}.pricingLogisticMode{margin-top:10px;font-size:.9rem}
-.imageManagerGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin:14px 0}.imageManagerCard{border:1px solid var(--line,#d8dee8);border-radius:12px;padding:9px;display:grid;gap:8px}.imageManagerCard.principal{outline:2px solid rgba(79,107,237,.5)}.imageManagerPreview{position:relative;aspect-ratio:1/1;background:#f4f6f9;border-radius:9px;overflow:hidden}.imageManagerPreview img{width:100%;height:100%;object-fit:contain}.imageManagerPreview span{position:absolute;left:7px;top:7px;padding:4px 7px;border-radius:999px;background:#111827;color:white;font-size:.72rem;font-weight:700}.imageManagerMeta{display:flex;gap:7px;min-width:0}.imageManagerMeta small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.imageManagerActions{display:flex;gap:6px;flex-wrap:wrap}.accountPill{display:inline-block;padding:4px 7px;border-radius:999px;background:#eef2ff;font-size:.75rem;font-weight:700}.draftCommercialCell{display:grid;gap:5px;min-width:150px}.draftCommercialCell select{min-width:125px}.b2bReviewPanel{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:9px;margin:12px 0}.b2bReviewPanel>div{border:1px solid var(--line,#d8dee8);border-radius:10px;padding:10px;display:flex;flex-direction:column;gap:3px}.b2bReviewPanel span{font-size:.78rem;color:var(--muted,#667085)}
-.managerBulkPanel{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:11px;margin:10px 0;border:1px solid var(--line,#d8dee8);border-radius:10px}.managerBulkPanel input,.managerBulkPanel select{width:auto;min-width:130px}.managerNotice{padding:10px 12px;border-radius:9px;background:#ecfdf3;color:#166534}.managerSubId{display:block;color:var(--muted,#667085);font-size:.7rem}.managerEditPanel{margin-top:14px;padding:14px;border:1px solid var(--line,#d8dee8);border-radius:12px}.managerEditHeader{display:flex;justify-content:space-between;gap:12px}.managerEditHeader>div{display:flex;flex-direction:column;gap:3px}.managerEditFields{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin:12px 0}.managerDiffs{display:grid;gap:7px;margin-top:10px}.managerDiffs>div{display:flex;justify-content:space-between;gap:12px;padding:8px 10px;background:#f7f8fa;border-radius:8px}
+/* Explicit product image order. The first persisted position is the ML principal image. */
+.imageManager{margin:18px 0;padding:16px;border:1px solid #dfe6f2;border-radius:12px;background:#f8fafc}
+.imageManagerHeader h3{margin:0 0 4px;color:#21385f}.imageManagerHeader p{margin:0;color:#718096;font-size:12px}
+.imageManagerGrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(170px,1fr));gap:12px;margin-top:14px}
+.imageManagerCard{background:#fff;border:1px solid #dde5f0;border-radius:12px;padding:10px;display:grid;gap:9px}.imageManagerCard.primary{border-width:2px}
+.imageThumbWrap{position:relative;aspect-ratio:1/1;border-radius:9px;overflow:hidden;background:#eef2f7}.imageThumb{width:100%;height:100%;object-fit:contain;display:block}
+.primaryImageBadge{position:absolute;left:7px;top:7px;background:#1f5ea8;color:#fff;border-radius:999px;padding:4px 8px;font-size:10px;font-weight:800}
+.imageManagerMeta{display:grid;gap:2px;min-width:0}.imageManagerMeta b{font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.imageManagerMeta small{font-size:10px;color:#7b8799}
+.imageManagerActions{display:flex;gap:6px;align-items:center}.imageManagerActions .dangerButton{margin-left:auto}
 
-/* UX polish: bottom-flow navigation, integrated pricing ledger, drag-and-drop images. */
-.wizardNavigationBottom{margin-top:20px;margin-bottom:0;border-top:3px solid #dfe6f2}
-.saveProductFooter{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-top:20px;padding:16px 18px;border:1px solid #d9e3f1;border-radius:14px;background:#f7f9fd}
-.saveProductFooter>div{display:grid;gap:4px}.saveProductFooter b{color:#20385f}.saveProductFooter small{color:#6d788d;line-height:1.4}.saveProductFooter button{min-width:180px}
-.pricingShippingSelector{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:14px 15px;border:1px solid #dfe6f2;border-radius:12px;background:#fff;margin:12px 0}
-.pricingShippingSelector>div:first-child{display:grid;gap:4px}.pricingShippingSelector>div:first-child b{color:#263b68}.pricingShippingSelector>div:first-child small{color:#758095;line-height:1.4}.pricingShippingSelector .segmentedChoice{min-width:min(430px,100%)}
-.publisherPricingLedger{border:1px solid #dfe6f2;border-radius:14px;background:#fff;overflow:hidden}
-.publisherLedgerTitle{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 16px;background:#f6f8fc;border-bottom:1px solid #e4e9f2}.publisherLedgerTitle>div{display:grid;gap:3px}.publisherLedgerTitle b{color:#1e355e}.publisherLedgerTitle small{color:#778399}.publisherLedgerTitle>span{font-size:11px;font-weight:800;color:#304b7a;background:#eaf0fb;padding:5px 8px;border-radius:999px;white-space:nowrap}
-.publisherLedgerRow{display:grid;grid-template-columns:32px minmax(0,1fr) auto;align-items:center;gap:10px;padding:10px 16px;border-bottom:1px solid #edf0f5}.publisherLedgerRow .sign{font-size:20px;font-weight:900;color:#a24040}.publisherLedgerRow.income .sign{color:#26704c}.publisherLedgerRow span:nth-child(2){color:#526078}.publisherLedgerRow b{color:#263b68}.publisherLedgerTotal{display:grid;grid-template-columns:32px minmax(0,1fr) auto;align-items:center;gap:10px;padding:14px 16px;background:#f8fafc}.publisherLedgerTotal>span{font-size:20px;font-weight:900;color:#203d73}.publisherLedgerTotal>div{display:grid;gap:2px}.publisherLedgerTotal small{color:#758095}.publisherLedgerTotal strong{font-size:18px;color:#1e3a63}
-.imageDragHint{margin-top:12px;padding:9px 11px;border-radius:9px;background:#f5f7fb;color:#617089;font-size:12px;border:1px solid #e2e7f0}.imageManagerCard{position:relative;cursor:grab;transition:transform .15s ease,box-shadow .15s ease,opacity .15s ease}.imageManagerCard:active{cursor:grabbing}.imageManagerCard.dragging{opacity:.45;transform:scale(.98)}.imageManagerCard:hover{box-shadow:0 8px 22px rgba(27,46,82,.10)}.imageDragHandle{position:absolute;right:9px;top:9px;z-index:2;width:28px;height:28px;border-radius:8px;background:rgba(255,255,255,.9);display:grid;place-items:center;color:#445675;font-size:18px;box-shadow:0 2px 8px rgba(24,43,78,.12);pointer-events:none}
-.validationProgressModal .progressSteps{margin-top:12px}
-@media(max-width:760px){.saveProductFooter,.pricingShippingSelector,.publisherLedgerTitle{align-items:stretch;flex-direction:column}.saveProductFooter button{width:100%}.pricingShippingSelector .segmentedChoice{min-width:0}.publisherLedgerTotal{grid-template-columns:28px 1fr}.publisherLedgerTotal strong{grid-column:2}.wizardNavigationBottom{margin-top:14px}}
+.multiAccountSelector{margin:18px 0;padding:16px;border:1px solid #dfe6f2;border-radius:12px;background:#fff}.multiAccountSelector h3{margin:0 0 4px;color:#21385f}.multiAccountSelector p{margin:0;color:#718096;font-size:12px}.publisherStartAccounts{margin:16px 0 4px;background:#f8fbff;border-color:#cfdceb}.multiAccountGrid{display:flex;flex-wrap:wrap;gap:9px;margin:12px 0}.accountCheck{display:flex;align-items:center;gap:8px;padding:9px 12px;border:1px solid #dfe6f2;border-radius:10px;background:#f8fafc;font-weight:700}.accountCheck.selected{border-color:#8ab5ff;background:#eaf3ff;color:#175fbf}.accountCheck input{width:auto}.accountDraftPill{display:inline-flex;padding:4px 7px;border-radius:999px;background:#eef4fb;color:#315d9b;font-size:10px;font-weight:800;white-space:nowrap}
+
+.logisticsQuoteGrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.logisticsQuoteCard,.logisticsPricingMode{display:grid;gap:4px;padding:13px;border:1px solid #dde5f0;border-radius:10px;background:#f8fafc}.logisticsQuoteCard.selected{border-width:2px;background:#eef5ff}.logisticsQuoteCard span,.logisticsPricingMode span{font-size:10px;text-transform:uppercase;letter-spacing:.45px;color:#7d899b;font-weight:800}.logisticsQuoteCard b{font-size:18px;color:#21385f}.logisticsQuoteCard small{font-size:10px;color:#718096}.logisticsPricingMode{grid-column:1/-1;display:flex;justify-content:space-between;align-items:center}.logisticsPricingMode b{color:#1f5ea8}@media(max-width:760px){.logisticsQuoteGrid{grid-template-columns:1fr}.logisticsPricingMode{grid-column:auto}}
+
+/* Publisher pricing workspace — approved unified design. */
+.publisherPricingUnified {
+  display: grid;
+  gap: 18px;
+  margin-top: 8px;
+}
+.publisherPricingHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+}
+.publisherPricingHeader h2,
+.publisherPricingHeader p,
+.publisherPricingSubheader h3,
+.publisherPricingSubheader p,
+.publisherPriceSummaryHeader h3,
+.publisherPriceSummaryHeader p,
+.publisherWholesaleHeader h3 {
+  margin: 0;
+}
+.publisherPricingHeader p,
+.publisherPricingSubheader p,
+.publisherPriceSummaryHeader p {
+  color: var(--muted, #70809a);
+  margin-top: 4px;
+}
+.publisherPricingTitleRow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+.publisherPricingTitleRow h2 {
+  font-size: 30px;
+  line-height: 1;
+}
+.pricingConfigPill,
+.technicalAutofillPill,
+.wholesalePendingPill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+.pricingConfigPill {
+  color: #1f67d6;
+  background: #edf4ff;
+}
+.technicalAutofillPill {
+  color: #25724e;
+  background: #eaf7ef;
+}
+.wholesalePendingPill {
+  color: #9c6111;
+  background: #fff4dc;
+}
+.publisherPricingTopGrid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.9fr) minmax(220px, 0.9fr) minmax(460px, 1.6fr);
+  border: 1px solid #dbe4f1;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #fff;
+}
+.publisherPricingField,
+.publisherPackageFields {
+  padding: 18px 20px;
+}
+.publisherPricingField + .publisherPricingField,
+.publisherPackageFields {
+  border-left: 1px solid #e6edf6;
+}
+.publisherPricingField > span,
+.publisherPackageFields b {
+  display: block;
+  margin-bottom: 8px;
+  color: #35445f;
+  font-weight: 700;
+}
+.publisherPricingField small,
+.publisherPackageFields > small,
+.publisherCustomPrice small {
+  display: block;
+  margin-top: 7px;
+  color: #7d8ba2;
+}
+.moneyInput {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  align-items: center;
+  border: 1px solid #ccd8e8;
+  border-radius: 12px;
+  background: #fff;
+  overflow: hidden;
+}
+.moneyInput > span {
+  display: grid;
+  place-items: center;
+  height: 100%;
+  color: #52627d;
+  border-right: 1px solid #dce5f0;
+  font-weight: 700;
+}
+.moneyInput input {
+  border: 0 !important;
+  border-radius: 0 !important;
+  min-width: 0;
+  box-shadow: none !important;
+}
+.publisherPackageHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+.publisherPackageGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(90px, 1fr));
+  gap: 10px;
+}
+.publisherPackageGrid label {
+  font-size: 12px;
+  color: #66758f;
+}
+.publisherPackageGrid input {
+  margin-top: 5px;
+}
+.publisherPricingWorkspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(310px, 360px);
+  gap: 18px;
+  align-items: stretch;
+}
+.publisherPricingWorkbench {
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+.publisherLogisticsSection,
+.publisherMarginSection,
+.publisherPriceSummary,
+.publisherWholesalePricing {
+  border: 1px solid #dbe4f1;
+  border-radius: 16px;
+  background: #fff;
+}
+.publisherLogisticsSection,
+.publisherMarginSection {
+  padding: 18px;
+}
+.publisherPricingSubheader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+.publisherPricingSubheader > span {
+  color: #70809a;
+  font-style: italic;
+  font-size: 13px;
+}
+.publisherLogisticsCards {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.publisherLogisticsCard {
+  width: 100%;
+  padding: 16px;
+  text-align: left;
+  color: inherit;
+  background: #fff;
+  border: 1px solid #d6e0ed;
+  border-radius: 14px;
+  box-shadow: none;
+}
+.publisherLogisticsCard:hover:not(:disabled) {
+  border-color: #8ab5ff;
+  background: #fbfdff;
+}
+.publisherLogisticsCard.selected {
+  border-color: #3f86ff;
+  box-shadow: 0 0 0 1px #3f86ff inset;
+  background: #fbfdff;
+}
+.publisherLogisticsCard:disabled {
+  opacity: .68;
+  cursor: not-allowed;
+}
+.publisherLogisticsCardTitle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  margin-bottom: 14px;
+}
+.publisherLogisticsCardTitle b {
+  font-size: 16px;
+}
+.publisherLogisticsCardTitle em {
+  margin-left: auto;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: #1863d3;
+  background: #eaf2ff;
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 700;
+}
+.radioDot {
+  width: 17px;
+  height: 17px;
+  border-radius: 50%;
+  border: 2px solid #c8d3e2;
+  box-shadow: inset 0 0 0 3px #fff;
+  background: #fff;
+}
+.publisherLogisticsCard.selected .radioDot {
+  border-color: #2877f0;
+  background: #2877f0;
+}
+.publisherLogisticsCardBody {
+  display: grid;
+  grid-template-columns: minmax(145px, .8fr) minmax(0, 1.2fr);
+  gap: 18px;
+}
+.publisherLogisticsCardBody > div:first-child {
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  border-right: 1px solid #e4eaf3;
+}
+.publisherLogisticsCardBody strong {
+  font-size: 24px;
+  color: #12264b;
+}
+.publisherLogisticsCardBody small,
+.publisherLogisticsMeta span {
+  color: #71809a;
+  font-size: 12px;
+}
+.publisherLogisticsMeta {
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+.publisherLogisticsFooter {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(220px, 1fr);
+  gap: 14px;
+  margin-top: 14px;
+}
+.pricingResolvedContext.compact {
+  min-height: auto;
+}
+.publisherMarginControls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 360px);
+  gap: 18px;
+  align-items: start;
+}
+.publisherMarginSelector {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
+  min-width: 0;
+}
+.publisherMarginSelector button {
+  min-width: 0;
+  min-height: 74px;
+  padding: 12px 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  line-height: 1.12;
+  font-size: 13px;
+  font-weight: 800;
+  background: #fff;
+  color: #2d3d59;
+  border: 1px solid #d3deeb;
+  box-shadow: none;
+}
+.publisherMarginSelector button.active {
+  color: #175fbf;
+  border-color: #8ab5ff;
+  background: #eaf3ff;
+}
+.publisherCustomPrice {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+.publisherCustomPrice .inputWithPrefix,
+.publisherCustomPrice input {
+  width: 100%;
+  min-width: 0;
+}
+.publisherPricingPrimaryActions {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin-top: 14px;
+}
+.publisherPricingPrimaryActions span {
+  color: #71809a;
+  font-size: 12px;
+}
+.publisherPriceSummary {
+  padding: 18px;
+  background: linear-gradient(180deg, #fbfdff 0%, #f7faff 100%);
+}
+.publisherPriceSummaryHeader h3 {
+  font-size: 22px;
+  color: #152b58;
+}
+.publisherPrincipalPrice {
+  margin: 12px 0 14px;
+  padding: 12px 16px;
+  border-radius: 12px;
+  background: #eaf3ff;
+  color: #0c3f95;
+  font-size: 30px;
+  font-weight: 800;
+}
+.publisherInstallmentActions {
+  display: grid;
+  gap: 8px;
+}
+.publisherInstallmentActions button {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 11px 12px;
+  border: 1px solid #d5e0ed;
+  border-radius: 11px;
+  background: #fff;
+  color: #164f9f;
+  box-shadow: none;
+}
+.publisherInstallmentActions button.active {
+  border-color: #4b8df6;
+  background: #edf5ff;
+}
+.publisherInstallmentActions button b {
+  color: #172a4d;
+}
+.publisherInstallmentPreview {
+  display: grid;
+  gap: 7px;
+  margin-top: 10px;
+  padding: 11px 12px;
+  border: 1px solid #e0e7f0;
+  border-radius: 12px;
+  background: #fff;
+}
+.publisherInstallmentPreview > div {
+  display: grid;
+  grid-template-columns: 70px 1fr;
+  align-items: center;
+  gap: 8px;
+}
+.publisherInstallmentPreview b {
+  text-align: right;
+}
+.publisherInstallmentPreview small {
+  grid-column: 1 / -1;
+  color: #7a899f;
+}
+.publisherPriceLedger {
+  display: grid;
+  gap: 8px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid #dfe7f0;
+}
+.publisherPriceLedger > div {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 12px;
+  color: #65748c;
+  font-size: 13px;
+}
+.publisherPriceLedger b {
+  color: #35445f;
+}
+.publisherMarginResult {
+  grid-template-columns: 1fr auto auto !important;
+  margin-top: 4px;
+  padding-top: 10px;
+  border-top: 1px solid #dfe7f0;
+  font-weight: 800;
+}
+.publisherMarginResult b,
+.publisherMarginResult strong {
+  color: #168548;
+}
+.publisherPriceSummaryEmpty {
+  margin-top: 14px;
+  color: #7b899d;
+  font-size: 13px;
+}
+.publisherWholesalePricing {
+  padding: 16px 18px;
+}
+.publisherWholesaleHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  margin-bottom: 8px;
+}
+.publisherWholesaleHeader > div:first-child {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.installmentConfiguration {
+  margin-top: 14px;
+}
+.installmentConfiguration small {
+  color: #71809a;
+}
+
+@media (max-width: 1260px) {
+  .publisherMarginControls { grid-template-columns: 1fr; }
+  .publisherCustomPrice { max-width: 420px; }
+}
+
+@media (max-width: 1180px) {
+  .publisherPricingTopGrid { grid-template-columns: 1fr 1fr; }
+  .publisherPackageFields { grid-column: 1 / -1; border-left: 0; border-top: 1px solid #e6edf6; }
+  .publisherPricingWorkspace { grid-template-columns: 1fr; }
+  .publisherPriceSummary { order: 2; }
+  .publisherMarginSelector { grid-template-columns: repeat(3, 1fr); }
+}
+@media (max-width: 760px) {
+  .publisherPricingTopGrid,
+  .publisherMarginControls,
+  .publisherLogisticsCards,
+  .publisherLogisticsFooter { grid-template-columns: 1fr; }
+  .publisherPricingField + .publisherPricingField,
+  .publisherPackageFields { border-left: 0; border-top: 1px solid #e6edf6; }
+  .publisherPackageFields { grid-column: auto; }
+  .publisherPackageGrid { grid-template-columns: repeat(2, 1fr); }
+  .publisherMarginSelector { grid-template-columns: repeat(2, 1fr); }
+  .publisherMarginSelector button { min-height: 68px; }
+  .publisherWholesaleHeader { align-items: flex-start; flex-direction: column; }
+}
+
+/* Price calculator aligned with the approved Publisher pricing workspace. */
+.calculatorUnifiedShell{display:grid;gap:18px}
+.calculatorContextPanel{display:grid;gap:14px;padding:18px;border:1px solid #dbe4f1;border-radius:16px;background:#f8fbff}
+.calculatorPricingUnified{margin-top:0}
+.calculatorExistingTopGrid{grid-template-columns:minmax(260px,520px)}
+.calculatorExistingTopGrid .publisherPricingField{border-left:0}
+.calculatorLogisticsFooter{align-items:end}
+.calculatorUsePriceBar{display:flex;align-items:center;justify-content:space-between;gap:18px;padding:15px 16px;border:1px solid #dbe4f1;border-radius:14px;background:#f8fbff}
+.calculatorUsePriceBar>div{display:grid;gap:4px}.calculatorUsePriceBar b{color:#24385f}.calculatorUsePriceBar span{color:#718096;font-size:12px}
+@media(max-width:760px){.calculatorUsePriceBar{align-items:stretch;flex-direction:column}.calculatorUsePriceBar button{width:100%}}
+
+/* UX final: navegación al pie, guardado al cierre de Precios y reordenamiento visual de imágenes. */
+.wizardNavigation{margin-top:18px;margin-bottom:0}
+.publisherSaveFooter{display:grid;gap:8px;margin-top:18px;padding-top:16px;border-top:1px solid #e2e8f2}
+.publisherSaveFooter>button{justify-self:start;min-width:180px}
+.imageManagerCard[draggable="true"]{cursor:grab;user-select:none}
+.imageManagerCard[draggable="true"]:active{cursor:grabbing}
+.imageManagerCard[draggable="true"]:hover{border-color:#8ab5ff;box-shadow:0 0 0 1px rgba(63,134,255,.12)}
+@media(max-width:760px){.publisherSaveFooter>button{width:100%}}

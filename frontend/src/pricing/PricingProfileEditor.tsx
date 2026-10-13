@@ -31,6 +31,10 @@ export function PricingProfileEditor({ profile, busy, onChange, onSave }: Props)
         <label>Margen objetivo %<input type="number" min="0" max="99" step="0.1" value={profile.target_margin_pct} onChange={event => update({ target_margin_pct: numberOrZero(event.target.value) })} /></label>
         <label>Margen mínimo %<input type="number" min="0" max="99" step="0.1" value={profile.minimum_margin_pct} onChange={event => update({ minimum_margin_pct: numberOrZero(event.target.value) })} /></label>
       </div>
+      <div className="grid2 installmentConfiguration">
+        <label>Incremento precio 3 cuotas %<input type="number" min="0" max="99" step="0.1" value={profile.installment_3_markup_pct} onChange={event => update({ installment_3_markup_pct: numberOrZero(event.target.value) })} /><small>Se aplica sobre el precio principal cuando elegís calcular la variante de 3 cuotas.</small></label>
+        <label>Incremento precio 6 cuotas %<input type="number" min="0" max="99" step="0.1" value={profile.installment_6_markup_pct} onChange={event => update({ installment_6_markup_pct: numberOrZero(event.target.value) })} /><small>Se aplica sobre el precio principal; no acumula el incremento de 3 cuotas.</small></label>
+      </div>
       <div className="grid4">
         <label>IVA %<input type="number" min="0" max="99" step="0.01" value={profile.vat_rate_pct} onChange={event => update({ vat_rate_pct: numberOrZero(event.target.value) })} /></label>
         <label>IIBB %<input type="number" min="0" max="99" step="0.01" value={profile.iibb_rate_pct} onChange={event => update({ iibb_rate_pct: numberOrZero(event.target.value) })} /></label>

@@ -27,6 +27,8 @@ export type PricingProfile = {
   currency_id: string;
   target_margin_pct: number;
   minimum_margin_pct: number;
+  installment_3_markup_pct: number;
+  installment_6_markup_pct: number;
   vat_rate_pct: number;
   iibb_rate_pct: number;
   ads_rate_pct: number;

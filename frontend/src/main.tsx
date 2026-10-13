@@ -1,6 +1,6 @@
 import React, {useEffect, useMemo, useRef, useState} from "react";
 import {createRoot} from "react-dom/client";
-import {BASE, api, downloadFile, jobEvents, loadReusableTechnicalAttributes, loadShippingCapabilities, previewMlaPublication, resolveMlaPublicationReuse} from "./api";
+import {api, downloadFile, jobEvents, loadReusableTechnicalAttributes, loadShippingCapabilities, previewMlaPublication, resolveMlaPublicationReuse} from "./api";
 import {PriceCalculator} from "./pricing/PriceCalculator";
 import {PricingProfileEditor} from "./pricing/PricingProfileEditor";
 import {normalizeQuantityPricing, type PricingCalculation, type PricingCalculatorPrefill, type PricingProfile, type QuantityPricingAnalysis, type QuantityPricingApiResponse, type ShippingCapabilities} from "./pricing/types";
@@ -212,6 +212,83 @@ function buildMeasurementValue(numberText: string, unit: string) {
   };
 }
 
+function packageDimensionParts(dimensions: string) {
+  const [length = "", width = "", height = ""] = String(dimensions || "").split("x").map(value => value.trim());
+  return {length, width, height};
+}
+
+function packageDimensionsValue(parts: {length: string; width: string; height: string}) {
+  if (!parts.length && !parts.width && !parts.height) return "";
+  return `${parts.length}x${parts.width}x${parts.height}`;
+}
+
+function numericMeasurement(value: any): {number: number; unit: string} | null {
+  const struct = typeof value === "object" && value ? (value.value_struct || value.struct || {}) : {};
+  const structured = Number(struct.number);
+  const structuredUnit = String(struct.unit || "").trim().toLowerCase();
+  if (Number.isFinite(structured) && structured > 0) return {number: structured, unit: structuredUnit};
+  const raw = identifierText(value).replace(",", ".");
+  const match = raw.match(/(-?\d+(?:\.\d+)?)\s*([a-zA-Z]+)?/);
+  if (!match) return null;
+  const number = Number(match[1]);
+  if (!Number.isFinite(number) || number <= 0) return null;
+  return {number, unit: String(match[2] || "").toLowerCase()};
+}
+
+function measurementToCm(measurement: {number: number; unit: string} | null) {
+  if (!measurement) return "";
+  const factors: Record<string, number> = {mm: 0.1, cm: 1, m: 100};
+  const factor = factors[measurement.unit] ?? (measurement.unit ? NaN : 1);
+  if (!Number.isFinite(factor)) return "";
+  return String(Math.round(measurement.number * factor * 100) / 100);
+}
+
+function measurementToKg(measurement: {number: number; unit: string} | null) {
+  if (!measurement) return "";
+  const factors: Record<string, number> = {g: 0.001, gr: 0.001, kg: 1};
+  const factor = factors[measurement.unit] ?? (measurement.unit ? NaN : 1);
+  if (!Number.isFinite(factor)) return "";
+  return String(Math.round(measurement.number * factor * 1000) / 1000);
+}
+
+function technicalPackageDefaults(fields: Field[], values: Record<string, any>) {
+  const find = (kind: "length" | "width" | "height" | "weight") => {
+    const patterns = {
+      length: /(package|packaging|paquete|embalaje).*(length|largo)|(length|largo).*(package|packaging|paquete|embalaje)/i,
+      width: /(package|packaging|paquete|embalaje).*(width|ancho)|(width|ancho).*(package|packaging|paquete|embalaje)/i,
+      height: /(package|packaging|paquete|embalaje).*(height|alto)|(height|alto).*(package|packaging|paquete|embalaje)/i,
+      weight: /(package|packaging|paquete|embalaje).*(weight|peso)|(weight|peso).*(package|packaging|paquete|embalaje)/i,
+    }[kind];
+    const field = fields.find(candidate => patterns.test(`${candidate.id} ${candidate.label}`));
+    return field ? numericMeasurement(values[field.id]) : null;
+  };
+  return {
+    length: measurementToCm(find("length")),
+    width: measurementToCm(find("width")),
+    height: measurementToCm(find("height")),
+    weight: measurementToKg(find("weight")),
+  };
+}
+
+function installmentPrice(basePrice: number, markupPct: number) {
+  if (!Number.isFinite(basePrice) || basePrice <= 0) return 0;
+  const markup = Number.isFinite(markupPct) ? Math.max(0, markupPct) : 0;
+  return Math.round(basePrice * (1 + markup / 100));
+}
+
+function publisherScenarioTarget(analysis: any, scenario: "mc0" | "mc15" | "mc20" | "mc25" | "mc35" | "custom") {
+  if (!analysis || scenario === "custom") return null;
+  if (scenario === "mc25" || scenario === "mc35") return analysis.custom || null;
+  return analysis[scenario] || null;
+}
+
+function publisherScenarioBreakdown(analysis: any, scenario: "mc0" | "mc15" | "mc20" | "mc25" | "mc35" | "custom", variant: "base" | "3" | "6") {
+  if (!analysis) return null;
+  if (variant !== "base" || scenario === "custom") return analysis.analyzed || null;
+  if (scenario === "mc25" || scenario === "mc35") return analysis.breakdowns?.custom || analysis.analyzed || null;
+  return analysis.breakdowns?.[scenario] || analysis.analyzed || null;
+}
+
 function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [categorySuggestions, setCategorySuggestions] = useState<CategorySuggestion[]>([]);
@@ -220,7 +297,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const [categoryContractLoading, setCategoryContractLoading] = useState(false);
   const [titleMaxLength, setTitleMaxLength] = useState<number | null>(null);
   const [accountId, setAccountId] = useState("");
-  const [selectedAccountIds, setSelectedAccountIds] = useState<string[]>([]);
+  const [targetAccountIds, setTargetAccountIds] = useState<string[]>([]);
   const [categoryId, setCategoryId] = useState("");
   const [fields, setFields] = useState<Field[]>([]);
   const [requirements, setRequirements] = useState<RequirementGroup[]>([]);
@@ -237,8 +314,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const [keywordIntelligence, setKeywordIntelligence] = useState<any>(null);
   const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
   const [generationActive, setGenerationActive] = useState(false);
-  const [validationProgress, setValidationProgress] = useState<{active: boolean; scope: "all" | "single"; message: string}>({active:false, scope:"all", message:""});
-  const [draggedImageId, setDraggedImageId] = useState<string | null>(null);
+  const [validationActive, setValidationActive] = useState(false);
   const [toasts, setToasts] = useState<ToastNotice[]>([]);
   const toastSequence = useRef(0);
   const dismissToast = React.useCallback((id: number) => {
@@ -332,15 +408,21 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const [pricingConfigured, setPricingConfigured] = useState(false);
   const [pricingProfile, setPricingProfile] = useState<PricingProfile>({
     name: "Mercado Libre", channel: "MERCADOLIBRE", currency_id: "ARS",
-    target_margin_pct: 20, minimum_margin_pct: 10, vat_rate_pct: 21, iibb_rate_pct: 0, ads_rate_pct: 0, refund_rate_pct: 0,
+    target_margin_pct: 20, minimum_margin_pct: 10, installment_3_markup_pct: 0, installment_6_markup_pct: 0, vat_rate_pct: 21, iibb_rate_pct: 0, ads_rate_pct: 0, refund_rate_pct: 0,
     monthly_units_projection: null, rounding_step: 1, components: []
   });
   const [productCost, setProductCost] = useState("0");
   const [pricingAnalysis, setPricingAnalysis] = useState<any>(null);
   const [calculatorPrefill, setCalculatorPrefill] = useState<PricingCalculatorPrefill | null>(null);
   const [simulationPackage, setSimulationPackage] = useState({
-    dimensions: "", weight: "", logisticType: "", shippingMode: "", freeShipping: "",
+    dimensions: "", weight: "", logisticType: "", shippingMode: "", freeShipping: "false",
   });
+  const [pricingLogisticType, setPricingLogisticType] = useState("");
+  const [pricingScenario, setPricingScenario] = useState<"mc0" | "mc15" | "mc20" | "mc25" | "mc35" | "custom">("mc20");
+  const [priceVariant, setPriceVariant] = useState<"base" | "3" | "6">("base");
+  const [basePrincipalPrice, setBasePrincipalPrice] = useState(0);
+  const [pricingRecalculationBusy, setPricingRecalculationBusy] = useState(false);
+  const customPriceTimerRef = useRef<number | null>(null);
   const [shippingCapabilities, setShippingCapabilities] = useState<ShippingCapabilities | null>(null);
   const [shippingCapabilitiesLoading, setShippingCapabilitiesLoading] = useState(false);
   const [shippingCapabilitiesError, setShippingCapabilitiesError] = useState("");
@@ -348,7 +430,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   const [quantityPricingEnabled, setQuantityPricingEnabled] = useState(false);
   const [quantityPrices, setQuantityPrices] = useState<QuantityPriceTier[]>([]);
   const [quantityPricingAnalysis, setQuantityPricingAnalysis] = useState<QuantityPricingAnalysis | null>(null);
-  const [installmentIncrements, setInstallmentIncrements] = useState({three: "0", six: "0"});
 
   const [form, setForm] = useState({
     sku: "", name: "", title: "", brand: "", model: "", characteristics: "", description: "",
@@ -358,8 +439,8 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
 
   // Only persisted product fields count as unsaved changes. Transient API metadata is excluded.
   const editSignature = JSON.stringify({
-    accountId, selectedAccountIds, categoryId, form, attributes, quantityPricingEnabled, quantityPrices,
-    simulationPackage, productCost, installmentIncrements,
+    accountId, categoryId, form, attributes, quantityPricingEnabled, quantityPrices,
+    simulationPackage, pricingLogisticType, productCost,
   });
   const dirty = Boolean(startMode && (versionId
     ? editSignature !== savedSignature
@@ -386,10 +467,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     () => accounts.find(account => account.id === accountId),
     [accounts, accountId]
   );
-  const publicationAccounts = useMemo(
-    () => selectedAccountIds.map(id => accounts.find(account => account.id === id)).filter(Boolean) as Account[],
-    [accounts, selectedAccountIds]
-  );
   const totalCount = Math.max(1, Number(form.count) || 1);
   const allocatedCount = commercialAllocations.reduce((sum, option) => sum + Math.max(0, option.count), 0);
   const distributionInvalid = allocatedCount !== totalCount;
@@ -397,6 +474,22 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     () => commercialAllocations.filter(option => option.count > 0),
     [commercialAllocations]
   );
+  const packageParts = packageDimensionParts(simulationPackage.dimensions);
+  const packageDefaults = technicalPackageDefaults(fields, currentProductAttributes());
+  const packageUsesTechnicalData = Boolean(
+    (packageDefaults.length && packageParts.length === packageDefaults.length)
+    || (packageDefaults.width && packageParts.width === packageDefaults.width)
+    || (packageDefaults.height && packageParts.height === packageDefaults.height)
+    || (packageDefaults.weight && simulationPackage.weight === packageDefaults.weight)
+  );
+  const selectedPricingTarget = publisherScenarioTarget(pricingAnalysis, pricingScenario);
+  const selectedPricingBreakdown = publisherScenarioBreakdown(pricingAnalysis, pricingScenario, priceVariant);
+  const displayedPrincipalPrice = Number(form.price) > 0
+    ? Number(form.price)
+    : Number(selectedPricingTarget?.gross_price || pricingAnalysis?.recommended_price || 0);
+  const installmentBasePrice = basePrincipalPrice > 0 ? basePrincipalPrice : displayedPrincipalPrice;
+  const installment3Price = installmentPrice(installmentBasePrice, pricingProfile.installment_3_markup_pct);
+  const installment6Price = installmentPrice(installmentBasePrice, pricingProfile.installment_6_markup_pct);
 
   const contextComplete = Boolean(accountId && categoryId);
   const shippingReady = Boolean(
@@ -483,10 +576,8 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   async function refreshAccounts() {
     const result = await api<Account[]>("/api/accounts");
     setAccounts(result);
-    if (!accountId && result.length === 1) {
-      setAccountId(result[0].id);
-      setSelectedAccountIds([result[0].id]);
-    }
+    if (!accountId && result.length === 1) setAccountId(result[0].id);
+    setTargetAccountIds(current => current.filter(id => result.some(account => account.id === id)));
   }
 
   async function searchCategoriesForPricing(pricingAccountId: string, query: string) {
@@ -517,7 +608,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
 
         if (connectedAccountId) {
           setAccountId(connectedAccountId);
-          setSelectedAccountIds([connectedAccountId]);
         }
 
         setMessage("Cuenta de Mercado Libre conectada correctamente.");
@@ -542,6 +632,8 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             currency_id: result.profile.currency_id,
             target_margin_pct: Number(result.profile.target_margin_pct),
             minimum_margin_pct: Number(result.profile.minimum_margin_pct),
+            installment_3_markup_pct: Number(result.profile.installment_3_markup_pct || 0),
+            installment_6_markup_pct: Number(result.profile.installment_6_markup_pct || 0),
             vat_rate_pct: Number(result.profile.vat_rate_pct),
             iibb_rate_pct: Number(result.profile.iibb_rate_pct),
             ads_rate_pct: Number(result.profile.ads_rate_pct),
@@ -581,6 +673,8 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   }
 
   useEffect(() => {
+    setTargetAccountIds(accountId ? [accountId] : []);
+    setBatchIds([]);
     setCategoryId("");
     setSelectedCategoryName("");
     setCategorySuggestions([]);
@@ -614,25 +708,35 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     if (!accountId || !categoryId) {
       setShippingCapabilities(null);
       setShippingCapabilitiesError("");
+    setLogisticsQuotes(null);
       setShippingCapabilitiesLoading(false);
       return () => { cancelled = true; };
     }
 
     setShippingCapabilitiesLoading(true);
     setShippingCapabilitiesError("");
+    setLogisticsQuotes(null);
     loadShippingCapabilities(accountId, categoryId)
       .then(capabilities => {
         if (cancelled) return;
         setShippingCapabilities(capabilities);
-        setSimulationPackage(current => {
-          const keepFlex = current.logisticType === capabilities.flex_logistic_type && capabilities.flex_available;
-          return {
-            ...current,
-            shippingMode: capabilities.mode,
-            logisticType: keepFlex ? capabilities.flex_logistic_type : capabilities.base_logistic_type,
-          };
-        });
+        setSimulationPackage(current => ({
+          ...current,
+          shippingMode: capabilities.mode,
+          freeShipping: current.freeShipping || "false",
+          // Publicación: Flex se ofrece siempre que Mercado Libre lo habilite.
+          logisticType: capabilities.flex_available
+            ? capabilities.flex_logistic_type
+            : capabilities.base_logistic_type,
+        }));
+        setPricingLogisticType(current => (
+          current === capabilities.base_logistic_type
+          || (capabilities.flex_available && current === capabilities.flex_logistic_type)
+            ? current
+            : capabilities.base_logistic_type
+        ));
         setPricingAnalysis(null);
+        setLogisticsQuotes(null);
       })
       .catch(reason => {
         if (cancelled) return;
@@ -654,10 +758,28 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   }, [activeCommercialAllocations]);
 
   useEffect(() => {
+    if (!fields.length) return;
+    const defaults = technicalPackageDefaults(fields, currentProductAttributes());
+    if (!defaults.length && !defaults.width && !defaults.height && !defaults.weight) return;
+    setSimulationPackage(current => {
+      const parts = packageDimensionParts(current.dimensions);
+      const nextParts = {
+        length: parts.length || defaults.length,
+        width: parts.width || defaults.width,
+        height: parts.height || defaults.height,
+      };
+      const nextDimensions = packageDimensionsValue(nextParts);
+      const nextWeight = current.weight || defaults.weight;
+      if (nextDimensions === current.dimensions && nextWeight === current.weight) return current;
+      return {...current, dimensions: nextDimensions, weight: nextWeight};
+    });
+  }, [fields, attributes]);
+
+  useEffect(() => {
     setQuantityPricingAnalysis(null);
   }, [
     accountId, categoryId, pricingListingTypeId, productCost, form.price,
-    simulationPackage.dimensions, simulationPackage.weight, simulationPackage.logisticType,
+    simulationPackage.dimensions, simulationPackage.weight, pricingLogisticType,
     simulationPackage.shippingMode, simulationPackage.freeShipping, pricingAnalysis,
     quantityPrices.map(tier => tier.min_purchase_unit).join(","),
   ]);
@@ -693,7 +815,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setKeywordIntelligence(null);
     setSelectedDraftIds([]);
     setBatchId("");
-    setBatchIds([]);
     Promise.all([
       api<any>(`/api/catalog/categories/${categoryId}?account_id=${encodeURIComponent(accountId)}`),
       loadPublicationTypes(accountId, categoryId),
@@ -905,11 +1026,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
       amount: Number(tier.amount),
     })));
     setQuantityPricingEnabled(Boolean(version.commercial?.quantity_pricing_enabled ?? savedQuantityPrices.length > 0));
-    const savedInstallments = version.commercial?.installment_increments_pct || {};
-    setInstallmentIncrements({
-      three: String(savedInstallments["3"] ?? savedInstallments[3] ?? "0"),
-      six: String(savedInstallments["6"] ?? savedInstallments[6] ?? "0"),
-    });
     const savedPricing = version.commercial?.pricing_analysis || null;
     const savedPricingInputs = savedPricing?.publisher_inputs || {};
     const savedPackage = version.logistics?.pricing_package || savedPricingInputs.package || {};
@@ -921,14 +1037,16 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setSimulationPackage({
       dimensions: String(savedPackage.dimensions || savedMarketplaceContext.dimensions || ""),
       weight: String(savedPackage.weight_kg ?? (Number.isFinite(weightFromAudit) && weightFromAudit > 0 ? weightFromAudit / 1000 : "")),
-      logisticType: String(savedPackage.logistic_type || savedMarketplaceContext.logistic_type || ""),
+      logisticType: String(savedPackage.publication_logistic_type || savedPackage.logistic_type || savedMarketplaceContext.logistic_type || ""),
       shippingMode: String(savedPackage.shipping_mode || savedMarketplaceContext.shipping_mode || ""),
       freeShipping: savedFreeShipping === true || savedFreeShipping === "true"
         ? "true"
-        : savedFreeShipping === false || savedFreeShipping === "false"
-          ? "false"
-          : "",
+        : "false",
     });
+    setPricingLogisticType(String(savedPackage.pricing_logistic_type || savedPricingInputs.package?.logistic_type || savedMarketplaceContext.logistic_type || ""));
+    setPricingScenario("mc20");
+    setPriceVariant("base");
+    setBasePrincipalPrice(Number(version.price) || 0);
 
     setCategoryId(version.category_id);
     setSelectedCategoryName(version.category_id);
@@ -999,28 +1117,45 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setManualMode(false);
     await refreshAccounts();
     setAccountId(result.id);
-    setSelectedAccountIds([result.id]);
     setMessage(`Cuenta ${result.nickname} conectada.`);
   }
 
   async function savePricingProfile() {
+    const expected3 = Number(pricingProfile.installment_3_markup_pct || 0);
+    const expected6 = Number(pricingProfile.installment_6_markup_pct || 0);
     const saved = await api<any>("/api/pricing/profile", {
       method: "PUT",
       body: JSON.stringify(pricingProfile),
     });
+    if (saved.installment_3_markup_pct === undefined || saved.installment_6_markup_pct === undefined) {
+      throw new Error("El backend activo no soporta todavía los porcentajes de 3/6 cuotas. Aplicá la migración 0014 y reiniciá el backend.");
+    }
+    const verified = await api<any>("/api/pricing/profile");
+    if (!verified?.configured || !verified.profile) {
+      throw new Error("La política económica no pudo verificarse después de guardarla.");
+    }
+    const persisted3 = Number(verified.profile.installment_3_markup_pct ?? NaN);
+    const persisted6 = Number(verified.profile.installment_6_markup_pct ?? NaN);
+    if (!Number.isFinite(persisted3) || !Number.isFinite(persisted6)
+      || Math.abs(persisted3 - expected3) > 0.0001
+      || Math.abs(persisted6 - expected6) > 0.0001) {
+      throw new Error("Los porcentajes de cuotas no quedaron persistidos. Verificá que Alembic esté en 0014_pricing_installment_markups.");
+    }
+    const profile = verified.profile;
     setPricingConfigured(true);
     setPricingProfile({
-      name: saved.name, channel: saved.channel, currency_id: saved.currency_id,
-      target_margin_pct: Number(saved.target_margin_pct), minimum_margin_pct: Number(saved.minimum_margin_pct),
-      vat_rate_pct: Number(saved.vat_rate_pct), iibb_rate_pct: Number(saved.iibb_rate_pct),
-      ads_rate_pct: Number(saved.ads_rate_pct), refund_rate_pct: Number(saved.refund_rate_pct),
-      monthly_units_projection: saved.monthly_units_projection, rounding_step: Number(saved.rounding_step),
-      components: (saved.components || []).map((component:any) => ({
+      name: profile.name, channel: profile.channel, currency_id: profile.currency_id,
+      target_margin_pct: Number(profile.target_margin_pct), minimum_margin_pct: Number(profile.minimum_margin_pct),
+      installment_3_markup_pct: persisted3, installment_6_markup_pct: persisted6,
+      vat_rate_pct: Number(profile.vat_rate_pct), iibb_rate_pct: Number(profile.iibb_rate_pct),
+      ads_rate_pct: Number(profile.ads_rate_pct), refund_rate_pct: Number(profile.refund_rate_pct),
+      monthly_units_projection: profile.monthly_units_projection, rounding_step: Number(profile.rounding_step),
+      components: (profile.components || []).map((component:any) => ({
         name: component.name, kind: component.kind, value: Number(component.value), basis: component.basis, active: Boolean(component.active)
       })),
     });
     setPricingAnalysis(null);
-    setMessage("Configuración económica guardada.");
+    setMessage(`Configuración económica guardada. 3 cuotas +${persisted3}% · 6 cuotas +${persisted6}%.`);
   }
 
   function publisherPricingPayload(salePrice: number | null) {
@@ -1033,65 +1168,220 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
       package: {
         dimensions: simulationPackage.dimensions || null,
         weight: simulationPackage.weight ? Number(simulationPackage.weight) : null,
-        logistic_type: simulationPackage.logisticType || null,
+        logistic_type: pricingLogisticType || simulationPackage.logisticType || null,
         shipping_mode: simulationPackage.shippingMode || null,
-        free_shipping: simulationPackage.freeShipping === "" ? null : simulationPackage.freeShipping === "true",
+        free_shipping: simulationPackage.freeShipping === "true",
       },
     };
   }
 
-  async function simulateCurrentPrice() {
+  async function refreshLogisticsQuotes(price: number, logisticType = pricingLogisticType) {
+    const listingTypeId = pricingListingTypeId;
+    if (!accountId || !categoryId || !listingTypeId || price <= 0) return;
+    if (!simulationPackage.dimensions || Number(simulationPackage.weight) <= 0) return;
+    try {
+      const quotes = await api<any>("/api/pricing/logistics-quotes", {
+        method: "POST",
+        body: JSON.stringify({
+          account_id: accountId,
+          category_id: categoryId,
+          listing_type_id: listingTypeId,
+          sale_price: price,
+          dimensions: simulationPackage.dimensions,
+          weight: Number(simulationPackage.weight),
+          free_shipping: simulationPackage.freeShipping === "true",
+          condition: "new",
+          currency_id: "ARS",
+        }),
+      });
+      setLogisticsQuotes(quotes);
+      if (!pricingLogisticType && logisticType) setPricingLogisticType(logisticType);
+    } catch {
+      setLogisticsQuotes(null);
+    }
+  }
+
+  async function simulateCurrentPrice(options?: {
+    salePrice?: number | null;
+    targetMarginPct?: number | null;
+    scenario?: "mc0" | "mc15" | "mc20" | "mc25" | "mc35" | "custom";
+    variant?: "base" | "3" | "6";
+    logisticType?: string;
+    updateBase?: boolean;
+  }) {
     if (!pricingConfigured) throw new Error("Configurá primero Costos y rentabilidad.");
     const listingTypeId = pricingListingTypeId;
     if (!accountId || !categoryId || !listingTypeId) {
       throw new Error("Elegí cuenta, categoría y la modalidad de Mercado Libre que querés analizar.");
     }
-    const result = await api<any>("/api/pricing/simulate", {
-      method: "POST",
-      body: JSON.stringify(publisherPricingPayload(Number(form.price) > 0 ? Number(form.price) : null)),
-    });
-    setPricingAnalysis({
-      calculation_version: "pricing_v2_economic",
-      ...result,
-      publisher_inputs: {
-        product_cost: Number(productCost),
-        package: {
-          dimensions: simulationPackage.dimensions || null,
-          weight_kg: simulationPackage.weight ? Number(simulationPackage.weight) : null,
-          logistic_type: simulationPackage.logisticType || null,
-          shipping_mode: simulationPackage.shippingMode || null,
-          free_shipping: simulationPackage.freeShipping === "" ? null : simulationPackage.freeShipping === "true",
-        },
+    const effectiveLogisticType = options?.logisticType || pricingLogisticType || simulationPackage.logisticType;
+    const requestedSalePrice = options && "salePrice" in options
+      ? options.salePrice ?? null
+      : (Number(form.price) > 0 ? Number(form.price) : null);
+    const payload = {
+      ...publisherPricingPayload(requestedSalePrice),
+      package: {
+        ...publisherPricingPayload(requestedSalePrice).package,
+        logistic_type: effectiveLogisticType || null,
       },
+      ...(options?.targetMarginPct !== undefined && options.targetMarginPct !== null
+        ? {target_margin_pct: options.targetMarginPct}
+        : {}),
+    };
+    setPricingRecalculationBusy(true);
+    try {
+      const result = await api<any>("/api/pricing/simulate", {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      const nextScenario = options?.scenario || (() => {
+        const recommendedMargin = Number(result.audit?.recommended_target_margin_pct);
+        if (Math.abs(recommendedMargin - 0) < 0.001) return "mc0" as const;
+        if (Math.abs(recommendedMargin - 15) < 0.001) return "mc15" as const;
+        if (Math.abs(recommendedMargin - 20) < 0.001) return "mc20" as const;
+        if (Math.abs(recommendedMargin - 25) < 0.001) return "mc25" as const;
+        if (Math.abs(recommendedMargin - 35) < 0.001) return "mc35" as const;
+        return "custom" as const;
+      })();
+      const target = nextScenario === "mc0" ? result.mc0
+        : nextScenario === "mc15" ? result.mc15
+        : nextScenario === "mc20" ? result.mc20
+        : nextScenario === "mc25" || nextScenario === "mc35" ? result.custom
+        : null;
+      const resolvedPrice = requestedSalePrice && requestedSalePrice > 0
+        ? requestedSalePrice
+        : Number(target?.gross_price || result.recommended_price || result.analyzed?.gross_price || 0);
+      const nextAnalysis = {
+        calculation_version: "pricing_v2_economic",
+        ...result,
+        publisher_inputs: {
+          product_cost: Number(productCost),
+          package: {
+            dimensions: simulationPackage.dimensions || null,
+            weight_kg: simulationPackage.weight ? Number(simulationPackage.weight) : null,
+            logistic_type: effectiveLogisticType || null,
+            shipping_mode: simulationPackage.shippingMode || null,
+            free_shipping: simulationPackage.freeShipping === "true",
+          },
+        },
+      };
+      setPricingAnalysis(nextAnalysis);
+      setPricingScenario(nextScenario);
+      setPriceVariant(options?.variant || "base");
+      if (resolvedPrice > 0) {
+        setForm(current => ({...current, price: String(resolvedPrice)}));
+        if (options?.updateBase !== false && (options?.variant || "base") === "base") {
+          setBasePrincipalPrice(resolvedPrice);
+        }
+        await refreshLogisticsQuotes(resolvedPrice, effectiveLogisticType);
+      }
+      return nextAnalysis;
+    } finally {
+      setPricingRecalculationBusy(false);
+    }
+  }
+
+  async function chooseMarginScenario(
+    scenario: "mc0" | "mc15" | "mc20" | "mc25" | "mc35",
+    margin: number,
+  ) {
+    if (!pricingAnalysis || scenario === "mc25" || scenario === "mc35") {
+      await simulateCurrentPrice({
+        salePrice: null,
+        targetMarginPct: margin,
+        scenario,
+        variant: "base",
+        updateBase: true,
+      });
+      return;
+    }
+    const target = pricingAnalysis[scenario];
+    const price = Number(target?.gross_price || 0);
+    if (!price) return;
+    setPricingScenario(scenario);
+    setPriceVariant("base");
+    setBasePrincipalPrice(price);
+    setForm(current => ({...current, price: String(price)}));
+    await refreshLogisticsQuotes(price);
+  }
+
+  function scheduleCustomPriceRecalculation(raw: string) {
+    setForm(current => ({...current, price: raw}));
+    setPricingScenario("custom");
+    setPriceVariant("base");
+    if (customPriceTimerRef.current !== null) window.clearTimeout(customPriceTimerRef.current);
+    const price = Number(raw);
+    if (!Number.isFinite(price) || price <= 0 || !pricingConfigured) return;
+    customPriceTimerRef.current = window.setTimeout(() => {
+      void simulateCurrentPrice({salePrice: price, scenario: "custom", variant: "base", updateBase: true})
+        .catch(reason => notify(reason instanceof Error ? reason.message : "No fue posible recalcular el precio.", "error"));
+    }, 450);
+  }
+
+  async function calculateInstallmentVariant(term: 3 | 6) {
+    const base = basePrincipalPrice > 0 ? basePrincipalPrice : Number(form.price);
+    if (!Number.isFinite(base) || base <= 0) throw new Error("Calculá primero el precio principal.");
+    const markup = term === 3 ? pricingProfile.installment_3_markup_pct : pricingProfile.installment_6_markup_pct;
+    const financedPrice = installmentPrice(base, markup);
+    await simulateCurrentPrice({
+      salePrice: financedPrice,
+      scenario: pricingScenario,
+      variant: term === 3 ? "3" : "6",
+      updateBase: false,
     });
   }
 
-  async function quoteLogistics() {
-    if (!accountId || !categoryId || !pricingListingTypeId) {
-      throw new Error("Completá cuenta, categoría y modalidad antes de cotizar logística.");
+  async function selectPricingLogistics(logisticType: string) {
+    setPricingLogisticType(logisticType);
+    const currentPrice = Number(form.price);
+    if (!pricingAnalysis || currentPrice <= 0) {
+      if (currentPrice > 0) await refreshLogisticsQuotes(currentPrice, logisticType);
+      return;
     }
-    const price = Number(form.price);
-    const weight = Number(simulationPackage.weight);
-    if (!Number.isFinite(price) || price <= 0) throw new Error("Ingresá un precio de venta válido.");
-    if (!simulationPackage.dimensions.trim() || !Number.isFinite(weight) || weight <= 0) {
-      throw new Error("Completá dimensiones y peso para cotizar Flex y Colecta.");
+
+    const marginByScenario: Partial<Record<typeof pricingScenario, number>> = {
+      mc0: 0, mc15: 15, mc20: 20, mc25: 25, mc35: 35,
+    };
+    const targetMargin = marginByScenario[pricingScenario];
+
+    // When a target MC is selected, changing logistics keeps that target and
+    // recalculates the required principal price. A custom price stays fixed.
+    if (targetMargin !== undefined) {
+      const activeVariant = priceVariant;
+      const baseAnalysis = await simulateCurrentPrice({
+        salePrice: null,
+        targetMarginPct: targetMargin,
+        scenario: pricingScenario,
+        variant: "base",
+        logisticType,
+        updateBase: true,
+      });
+      if (activeVariant !== "base") {
+        const target = publisherScenarioTarget(baseAnalysis, pricingScenario);
+        const recalculatedBase = Number(target?.gross_price || baseAnalysis?.recommended_price || 0);
+        if (recalculatedBase > 0) {
+          const markup = activeVariant === "3"
+            ? pricingProfile.installment_3_markup_pct
+            : pricingProfile.installment_6_markup_pct;
+          await simulateCurrentPrice({
+            salePrice: installmentPrice(recalculatedBase, markup),
+            scenario: pricingScenario,
+            variant: activeVariant,
+            logisticType,
+            updateBase: false,
+          });
+        }
+      }
+      return;
     }
-    if (simulationPackage.freeShipping === "") throw new Error("Indicá quién paga el envío.");
-    const result = await api<any>("/api/pricing/logistics-quotes", {
-      method: "POST",
-      body: JSON.stringify({
-        account_id: accountId,
-        category_id: categoryId,
-        listing_type_id: pricingListingTypeId,
-        item_price: price,
-        dimensions: simulationPackage.dimensions.trim(),
-        weight,
-        free_shipping: simulationPackage.freeShipping === "true",
-        condition: "new",
-        currency_id: "ARS",
-      }),
+
+    await simulateCurrentPrice({
+      salePrice: currentPrice,
+      scenario: "custom",
+      variant: priceVariant,
+      logisticType,
+      updateBase: priceVariant === "base",
     });
-    setLogisticsQuotes(result);
   }
 
   async function simulateQuantityPrices() {
@@ -1184,6 +1474,16 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setQuantityPrices(current => current.filter((_, position) => position !== index));
   }
 
+  function updatePackageDimensionPart(part: "length" | "width" | "height", value: string) {
+    const current = packageDimensionParts(simulationPackage.dimensions);
+    setSimulationPackage(previous => ({
+      ...previous,
+      dimensions: packageDimensionsValue({...current, [part]: value}),
+    }));
+    setPricingAnalysis(null);
+    setLogisticsQuotes(null);
+  }
+
   function currentProductAttributes() {
     return {
       ...attributes,
@@ -1224,10 +1524,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
       quantity_prices_draft: tiers.draft,
       quantity_prices: tiers.publishable,
       pricing_analysis: pricingAnalysis,
-      installment_increments_pct: {
-        "3": Number(installmentIncrements.three) || 0,
-        "6": Number(installmentIncrements.six) || 0,
-      },
     };
   }
 
@@ -1246,8 +1542,9 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
           dimensions: simulationPackage.dimensions.trim() || null,
           weight_kg: simulationPackage.weight ? Number(simulationPackage.weight) : null,
           logistic_type: simulationPackage.logisticType || null,
+          pricing_logistic_type: pricingLogisticType || null,
           shipping_mode: simulationPackage.shippingMode || null,
-          free_shipping: simulationPackage.freeShipping === "" ? null : simulationPackage.freeShipping === "true",
+          free_shipping: simulationPackage.freeShipping === "true",
         },
       } : {}),
     };
@@ -1265,7 +1562,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
       salePrice: form.price,
       dimensions: simulationPackage.dimensions,
       weight: simulationPackage.weight,
-      logisticType: simulationPackage.logisticType,
+      logisticType: pricingLogisticType || simulationPackage.logisticType,
       shippingMode: simulationPackage.shippingMode,
       freeShipping: simulationPackage.freeShipping,
     });
@@ -1353,8 +1650,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   }
 
   async function saveCorrectionsAndRevalidate() {
-    const activeBatchIds = batchIds.length ? batchIds : (batchId ? [batchId] : []);
-    if (!activeBatchIds.length || drafts.length === 0) {
+    if (!batchId || drafts.length === 0) {
       await createProduct();
       return;
     }
@@ -1365,35 +1661,26 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     if (!shippingReady) {
       throw new Error("Esperá a que Mercado Libre confirme la configuración de Mercado Envíos antes de revalidar.");
     }
+
     if (!versionId || !productMasterId) {
       throw new Error("No se identificó la versión de ficha asociada al lote. Volvé a cargar la ficha.");
     }
     const correctionToken = await takeEditLease(productMasterId);
-    const commonPayload = {
-      description: form.description,
-      price: Number(form.price),
-      quantity: Number(form.quantity),
-      attributes: currentProductAttributes(),
-      commercial: currentCommercialContract(),
-      logistics: currentLogisticsContract(),
-    };
-    const correction = activeBatchIds.length > 1
-      ? await api<any>("/api/drafts/batches/multi-product-correction", {
-          method:"POST",
-          headers: {
-            "X-Product-Lease-Token": correctionToken,
-            "X-Expected-Product-Version": versionId,
-          },
-          body:JSON.stringify({...commonPayload, batch_ids: activeBatchIds})
-        })
-      : await api<any>(`/api/drafts/batches/${activeBatchIds[0]}/product-correction`, {
-          method:"POST",
-          headers: {
-            "X-Product-Lease-Token": correctionToken,
-            "X-Expected-Product-Version": versionId,
-          },
-          body:JSON.stringify(commonPayload)
-        });
+    const correction = await api<any>(`/api/drafts/batches/${batchId}/product-correction`, {
+      method:"POST",
+      headers: {
+        "X-Product-Lease-Token": correctionToken,
+        "X-Expected-Product-Version": versionId,
+      },
+      body:JSON.stringify({
+        description: form.description,
+        price: Number(form.price),
+        quantity: Number(form.quantity),
+        attributes: currentProductAttributes(),
+        commercial: currentCommercialContract(),
+        logistics: currentLogisticsContract(),
+      })
+    });
 
     setVersionId(correction.version_id);
     setExistingProduct(previous => previous && previous.id === productMasterId
@@ -1402,19 +1689,15 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setUploadedImages((correction.images || []) as UploadedImage[]);
     setSavedSignature(editSignature);
     setLastSavedAt(new Date().toLocaleString("es-AR"));
-    setLastAction("Correcciones guardadas y operación revalidada.");
+    setLastAction("Correcciones guardadas y lote revalidado.");
 
-    const validations = await Promise.all(activeBatchIds.map(id =>
-      api<any>(`/api/drafts/batches/${id}/validate`, {method:"POST"})
-    ));
-    await loadBatches(activeBatchIds);
-    const ready = validations.reduce((sum, value) => sum + Number(value.ready || 0), 0);
-    const invalid = validations.reduce((sum, value) => sum + Number(value.invalid || 0), 0);
-    const firstIssue = validations.flatMap(value => value.results || []).flatMap((result:any) => result.errors || [])[0];
+    const validation = await api<any>(`/api/drafts/batches/${batchId}/validate`, {method:"POST"});
+    await loadBatch(batchId);
+    const firstIssue = validation.results?.flatMap((result:any) => result.errors || [])[0];
     setMessage(
       `Correcciones guardadas en la versión ${correction.version_number}. ` +
-      `${ready} borrador(es) listos y ${invalid} con observaciones.` +
-      (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : " No fue necesario regenerar títulos.")
+      `${validation.ready} borrador(es) listos y ${validation.invalid} con observaciones.` +
+      (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : " No fue necesario regenerar el lote.")
     );
   }
 
@@ -1474,41 +1757,44 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     }
   }
 
-  async function persistImageOrder(ordered: UploadedImage[]) {
+  async function persistImageOrder(next: UploadedImage[]) {
     if (!versionId || !productMasterId) return;
-    const token = await takeEditLease(productMasterId);
-    const result = await api<any>(`/api/products/versions/${versionId}/images/order`, {
-      method:"PUT",
-      headers:{"X-Product-Lease-Token":token},
-      body:JSON.stringify({image_ids: ordered.map(image => image.id)}),
+    await api(`/api/products/versions/${versionId}/images/order`, {
+      method: "PUT",
+      headers: {"X-Product-Lease-Token": await takeEditLease(productMasterId)},
+      body: JSON.stringify({image_ids: next.map(image => image.id)}),
     });
-    setUploadedImages(result.images || []);
-    setMessage("Orden de imágenes guardado. La primera imagen será la principal en todas las publicaciones.");
+    setUploadedImages(next.map((image, index) => ({...image, position: index + 1})));
+    setLastAction("Orden de imágenes guardado.");
   }
 
-  async function dropImageAt(targetImageId: string, placeAfter: boolean) {
-    if (!draggedImageId || draggedImageId === targetImageId) return;
-    const sourceIndex = uploadedImages.findIndex(image => image.id === draggedImageId);
-    const originalTargetIndex = uploadedImages.findIndex(image => image.id === targetImageId);
-    if (sourceIndex < 0 || originalTargetIndex < 0) return;
-    const ordered = [...uploadedImages];
-    const [moved] = ordered.splice(sourceIndex, 1);
-    let targetIndex = ordered.findIndex(image => image.id === targetImageId);
-    if (targetIndex < 0) return;
-    if (placeAfter) targetIndex += 1;
-    ordered.splice(targetIndex, 0, moved);
-    setDraggedImageId(null);
-    await persistImageOrder(ordered);
+  async function moveImage(index: number, delta: number) {
+    const target = index + delta;
+    if (target < 0 || target >= uploadedImages.length) return;
+    const next = [...uploadedImages];
+    [next[index], next[target]] = [next[target], next[index]];
+    await persistImageOrder(next);
   }
 
-  async function deleteUploadedImage(imageId: string) {
+  async function reorderImageByDrop(sourceId: string, targetId: string) {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    const sourceIndex = uploadedImages.findIndex(image => image.id === sourceId);
+    const targetIndex = uploadedImages.findIndex(image => image.id === targetId);
+    if (sourceIndex < 0 || targetIndex < 0) return;
+    const next = [...uploadedImages];
+    const [moved] = next.splice(sourceIndex, 1);
+    next.splice(targetIndex, 0, moved);
+    await persistImageOrder(next);
+  }
+
+  async function removeUploadedImage(imageId: string) {
     if (!versionId || !productMasterId) return;
-    const token = await takeEditLease(productMasterId);
-    const result = await api<any>(`/api/products/versions/${versionId}/images/${imageId}`, {
-      method:"DELETE", headers:{"X-Product-Lease-Token":token}
+    await api(`/api/products/versions/${versionId}/images/${imageId}`, {
+      method: "DELETE",
+      headers: {"X-Product-Lease-Token": await takeEditLease(productMasterId)},
     });
-    setUploadedImages(result.images || []);
-    setMessage("Imagen eliminada y posiciones normalizadas.");
+    await refreshUploadedImages(versionId);
+    setLastAction("Imagen eliminada y orden normalizado.");
   }
 
   function updateCommercialAllocation(commercialIntent: string, raw: string) {
@@ -1520,87 +1806,101 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
 
   async function generateDrafts() {
     if (distributionInvalid) {
-      throw new Error("La distribución comercial debe sumar exactamente el total de publicaciones.");
+      throw new Error("La distribución comercial debe sumar exactamente el total de publicaciones por cuenta.");
     }
-    const targetAccounts = selectedAccountIds.length ? selectedAccountIds : (accountId ? [accountId] : []);
-    if (!targetAccounts.length) throw new Error("Seleccioná al menos una cuenta de Mercado Libre.");
     const confirmedImages = await refreshUploadedImages();
     if (confirmedImages.length === 0) {
-      throw new Error("Cargá al menos una imagen válida antes de generar borradores.");
+      throw new Error("Las imágenes seleccionadas todavía no fueron cargadas al backend. Cargá al menos una imagen válida antes de generar borradores.");
     }
+    const targets = targetAccountIds.length ? targetAccountIds : (accountId ? [accountId] : []);
+    if (!targets.length) throw new Error("Seleccioná al menos una cuenta de Mercado Libre.");
     setGenerationActive(true);
     try {
       const distribution = commercialAllocations
         .filter(row => row.count > 0)
         .map(row => ({commercial_intent: row.commercial_intent, count: row.count}));
-      if (targetAccounts.length > 1) {
-        const result = await api<any>("/api/drafts/generate-multi", {
-          method:"POST",
-          body:JSON.stringify({
-            product_version_id: versionId,
-            account_ids: targetAccounts,
-            count: totalCount,
-            commercial_distribution: distribution
-          })
-        });
-        const ids = (result.batches || []).map((batch:any) => String(batch.batch_id));
-        setBatchIds(ids);
-        setBatchId(ids[0] || "");
-        await loadBatches(ids);
-        setLastAction(`${result.total_drafts} borradores generados en ${ids.length} cuentas. Siguiente: revisar y validar.`);
-        setMessage(`${result.total_drafts} borradores multicuenta generados con títulos reservados de forma única.`);
-      } else {
+      const createdBatchIds: string[] = [];
+      const collectedDrafts: Draft[] = [];
+      const reservedTitles: string[] = [];
+      let firstKeywordIntelligence: any = null;
+
+      for (const targetAccountId of targets) {
         const result = await api<any>("/api/drafts/generate", {
           method:"POST",
           body:JSON.stringify({
             product_version_id: versionId,
-            account_id: targetAccounts[0],
+            account_id: targetAccountId,
             count: totalCount,
-            commercial_distribution: distribution
+            commercial_distribution: distribution,
+            reserved_titles: reservedTitles,
           })
         });
-        setBatchId(result.batch_id);
-        setBatchIds([result.batch_id]);
-        await loadBatches([result.batch_id]);
-        setLastAction(`${result.count} borradores generados. Siguiente: revisar y validar.`);
-        setMessage(`${result.count} borradores generados con condiciones comerciales confirmadas por Mercado Libre.`);
+        const detail = await api<any>(`/api/drafts/batches/${result.batch_id}`);
+        const account = accounts.find(item => item.id === targetAccountId);
+        createdBatchIds.push(String(result.batch_id));
+        if (!firstKeywordIntelligence) firstKeywordIntelligence = detail.keyword_intelligence || null;
+        for (const draft of detail.drafts || []) {
+          collectedDrafts.push({
+            ...draft,
+            batch_id: String(result.batch_id),
+            account_id: targetAccountId,
+            account_nickname: account?.nickname || targetAccountId,
+          });
+          reservedTitles.push(String(draft.title));
+        }
       }
+
+      setBatchIds(createdBatchIds);
+      setBatchId(createdBatchIds[0] || "");
+      setDrafts(collectedDrafts);
+      setKeywordIntelligence(firstKeywordIntelligence);
+      setSelectedDraftIds([]);
+      setLastAction(`${collectedDrafts.length} borradores generados en ${createdBatchIds.length} cuenta(s). Siguiente: revisar y validar.`);
       setPublisherStep("review");
+      setMessage(`${collectedDrafts.length} borradores multicuenta generados sin repetir títulos dentro de la operación.`);
     } finally {
       setGenerationActive(false);
     }
   }
 
-  async function loadBatches(ids = (batchIds.length ? batchIds : (batchId ? [batchId] : []))) {
-    if (!ids.length) {
-      setDrafts([]);
-      return;
+  async function loadBatches(ids = batchIds.length ? batchIds : (batchId ? [batchId] : [])) {
+    if (!ids.length) return;
+    const details = await Promise.all(ids.map(id => api<any>(`/api/drafts/batches/${id}`)));
+    const combined: Draft[] = [];
+    for (const detail of details) {
+      const account = accounts.find(item => item.id === String(detail.account_id));
+      for (const draft of detail.drafts || []) {
+        combined.push({
+          ...draft,
+          batch_id: String(detail.id),
+          account_id: String(detail.account_id),
+          account_nickname: account?.nickname || String(detail.account_id),
+        });
+      }
     }
-    const results = await Promise.all(ids.map(id => api<any>(`/api/drafts/batches/${id}`)));
-    const accountById = new Map(accounts.map(account => [account.id, account.nickname]));
-    const merged: Draft[] = results.flatMap(result =>
-      (result.drafts || []).map((draft: Draft) => ({
-        ...draft,
-        batch_id: String(result.id),
-        account_id: String(result.account_id),
-        account_nickname: accountById.get(String(result.account_id)) || String(result.account_id),
-      }))
-    );
-    setDrafts(merged);
-    setKeywordIntelligence(results[0]?.keyword_intelligence || null);
-    setSelectedDraftIds(current => current.filter(draftId => merged.some(draft => draft.id === draftId)));
+    setDrafts(combined);
+    setKeywordIntelligence(details[0]?.keyword_intelligence || null);
+    setSelectedDraftIds(current => current.filter(draftId => combined.some((draft: Draft) => draft.id === draftId)));
   }
 
   async function loadBatch(id = batchId) {
-    const ids = batchIds.length > 1 && (!id || id === batchId) ? batchIds : (id ? [id] : []);
-    await loadBatches(ids);
+    if (!id) return;
+    if (batchIds.length > 1) {
+      await loadBatches(batchIds);
+      return;
+    }
+    const result = await api<any>(`/api/drafts/batches/${id}`);
+    const account = accounts.find(item => item.id === String(result.account_id));
+    const enriched = (result.drafts || []).map((draft: Draft) => ({...draft, batch_id: String(result.id), account_id: String(result.account_id), account_nickname: account?.nickname || String(result.account_id)}));
+    setDrafts(enriched);
+    setKeywordIntelligence(result.keyword_intelligence || null);
+    setSelectedDraftIds(current => current.filter(draftId => enriched.some((draft: Draft) => draft.id === draftId)));
   }
 
   async function validateDraft(id: string) {
-    setValidationProgress({active:true, scope:"single", message:"Preparando el borrador y consultando la prevalidación de Mercado Libre…"});
+    setValidationActive(true);
     try {
       const result = await api<any>(`/api/drafts/${id}/validate`, {method:"POST"});
-      setValidationProgress({active:true, scope:"single", message:"Procesando la respuesta de Mercado Libre y actualizando el estado del borrador…"});
       await loadBatch();
       const firstIssue = result.errors?.[0];
       setMessage(
@@ -1609,7 +1909,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
           : `Falta corregir: ${firstIssue?.message || "Mercado Libre rechazó la validación previa."}`
       );
     } finally {
-      setValidationProgress({active:false, scope:"single", message:""});
+      setValidationActive(false);
     }
   }
 
@@ -1618,53 +1918,33 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     await loadBatch();
   }
 
-  async function updateDraftCommercial(id: string, patch: Record<string, any>) {
-    await api(`/api/drafts/${id}/commercial`, {method:"PATCH", body:JSON.stringify(patch)});
-    await loadBatch();
-    setMessage("Configuración comercial del borrador actualizada. Volvé a validarlo antes de publicar.");
-  }
-
-  async function editDraftPriceOverride(draft: Draft) {
-    const current = draft.commercial_config?.price_override ?? form.price;
-    const raw = window.prompt("Precio manual para esta publicación. Dejalo vacío para volver al precio calculado por plan.", String(current ?? ""));
-    if (raw === null) return;
-    const trimmed = raw.trim();
-    if (!trimmed) {
-      await updateDraftCommercial(draft.id, {price_override:null});
-      return;
-    }
-    const value = Number(trimmed.replace(",", "."));
-    if (!Number.isFinite(value) || value <= 0) throw new Error("Ingresá un precio mayor a cero.");
-    await updateDraftCommercial(draft.id, {price_override:value});
-  }
-
   async function validateAll() {
     const ids = batchIds.length ? batchIds : (batchId ? [batchId] : []);
     if (!ids.length) return;
-    setValidationProgress({active:true, scope:"all", message:"Preparando todos los borradores y verificando contratos, atributos, imágenes y precios…"});
+    setValidationActive(true);
     try {
-      const results = await Promise.all(ids.map(id => api<any>(`/api/drafts/batches/${id}/validate`, {method:"POST"})));
-      setValidationProgress({active:true, scope:"all", message:"Mercado Libre respondió. Consolidando observaciones y actualizando cada borrador…"});
+      const results = [];
+      for (const id of ids) results.push(await api<any>(`/api/drafts/batches/${id}/validate`, {method:"POST"}));
       await loadBatches(ids);
       const ready = results.reduce((sum, result) => sum + Number(result.ready || 0), 0);
       const invalid = results.reduce((sum, result) => sum + Number(result.invalid || 0), 0);
       const firstIssue = results.flatMap(result => result.results || []).flatMap((item:any) => item.errors || [])[0];
-      setMessage(
-        `${ready} borrador(es) listos y ${invalid} con observaciones después de validar la operación.` +
-        (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : "")
-      );
+      setMessage(`${ready} borrador(es) listos y ${invalid} con observaciones después de validar ${ids.length} cuenta(s).` + (firstIssue?.message ? ` Falta corregir: ${firstIssue.message}` : ""));
     } finally {
-      setValidationProgress({active:false, scope:"all", message:""});
+      setValidationActive(false);
     }
   }
 
   async function approveReady() {
     const ids = batchIds.length ? batchIds : (batchId ? [batchId] : []);
     if (!ids.length) return;
-    const results = await Promise.all(ids.map(id => api<any>(`/api/drafts/batches/${id}/approve-ready`, {method:"POST"})));
+    let approved = 0;
+    for (const id of ids) {
+      const result = await api<any>(`/api/drafts/batches/${id}/approve-ready`, {method:"POST"});
+      approved += Number(result.approved || 0);
+    }
     await loadBatches(ids);
-    const approved = results.reduce((sum, result) => sum + Number(result.approved || 0), 0);
-    setMessage(`${approved} borrador(es) aprobados en toda la operación.`);
+    setMessage(`${approved} borrador(es) aprobados en ${ids.length} cuenta(s).`);
   }
 
   function watchJob(jobId: string) {
@@ -1686,7 +1966,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
         setResumeJobId("");
         setLastAction("Ejecución terminada. Revisá el resultado antes de crear una nueva publicación.");
         setSelectedDraftIds([]);
-        loadBatch();
+        loadBatches().catch(() => undefined);
         return true;
       }
       return false;
@@ -1720,10 +2000,10 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     if (!selectedApprovedDraftIds.length) {
       throw new Error("Seleccioná al menos un borrador APPROVED para publicar.");
     }
-    const multi = (batchIds.length ? batchIds : (batchId ? [batchId] : [])).length > 1;
-    const result = await api<any>(multi ? "/api/publication/jobs/consolidated" : "/api/publication/jobs", {
+    const multiAccount = new Set(drafts.filter(d => selectedApprovedDraftIds.includes(d.id)).map(d => d.account_id).filter(Boolean)).size > 1;
+    const result = await api<any>(multiAccount ? "/api/publication/jobs/multi" : "/api/publication/jobs", {
       method:"POST",
-      body:JSON.stringify(multi
+      body:JSON.stringify(multiAccount
         ? {draft_ids: selectedApprovedDraftIds}
         : {batch_id: batchId, draft_ids: selectedApprovedDraftIds})
     });
@@ -1731,7 +2011,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     trackedJobRef.current = result.job_id;
     if (accountId) window.localStorage.setItem(activeJobStorageKey(accountId), result.job_id);
     setResumeJobId(result.job_id);
-    setLastAction("Publicación iniciada. Consultá el progreso por cuenta y el resultado consolidado.");
+    setLastAction("Publicación iniciada. Consultá el progreso y el resultado.");
     setPublisherStep("execution");
     watchJob(result.job_id);
   }
@@ -1816,7 +2096,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     releaseEditLease();
     // The persisted job reference remains available for explicit recovery.
     setAccountId(nextAccountId);
-    setSelectedAccountIds(nextAccountId ? [nextAccountId] : []);
     setStartMode("");
     setMlaPreview(null);
     setMlaImportId("");
@@ -1839,6 +2118,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setVersionId("");
     setUploadedImages([]);
     setBatchId("");
+    setBatchIds([]);
     setDrafts([]);
     setSelectedDraftIds([]);
     setKeywordIntelligence(null);
@@ -1850,12 +2130,16 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
     setQuantityPricingEnabled(false);
     setQuantityPrices([]);
     setQuantityPricingAnalysis(null);
-    setInstallmentIncrements({three:"0", six:"0"});
     setPricingAnalysis(null);
     setProductCost("0");
-    setSimulationPackage({dimensions:"", weight:"", logisticType:"", shippingMode:"", freeShipping:""});
+    setSimulationPackage({dimensions:"", weight:"", logisticType:"", shippingMode:"", freeShipping:"false"});
+    setPricingLogisticType("");
+    setPricingScenario("mc20");
+    setPriceVariant("base");
+    setBasePrincipalPrice(0);
     setShippingCapabilities(null);
     setShippingCapabilitiesError("");
+    setLogisticsQuotes(null);
     setForm({sku:"", name:"", title:"", brand:"", model:"", characteristics:"", description:"",
       price:"0", quantity:"1", count:"6", localPickup:false, warrantyType:"SELLER",
       warrantyDuration:"30", warrantyUnit:"days"});
@@ -1889,13 +2173,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
   function switchAccount(nextAccountId: string) {
     if (nextAccountId === accountId || !confirmDiscard()) return;
     resetPublicationState(nextAccountId);
-  }
-
-  function togglePublicationAccount(id: string) {
-    setSelectedAccountIds(current => {
-      if (id === accountId) return current.includes(id) ? current : [id, ...current];
-      return current.includes(id) ? current.filter(value => value !== id) : [...current, id];
-    });
   }
 
   async function run<T>(fn: () => Promise<T>) {
@@ -2065,7 +2342,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
           {([
             ["category", "Producto y categoría", contextComplete],
             ["technical", "Ficha técnica", productComplete],
-            ["prices", "Precio y logística", Number(form.price) > 0 && shippingReady],
+            ["prices", "Precios", Number(form.price) > 0 && shippingReady],
             ["images", "Imágenes y lote", uploadedImages.length > 0],
             ["review", "Revisión", draftsComplete],
             ["execution", "Publicación", Boolean(terminalJob)],
@@ -2098,6 +2375,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
         <PriceCalculator
           accountId={accountId}
           accounts={accounts}
+          pricingProfile={pricingProfile}
           prefill={calculatorPrefill}
           onSearchCategories={searchCategoriesForPricing}
           onLoadPublicationTypes={loadPublicationTypes}
@@ -2116,7 +2394,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
 
         <section className="workflowContext" aria-label="Estado de la publicación actual">
           <div><span>Producto actual</span><strong>{form.sku.trim() || "Sin SKU"}</strong></div>
-          <div><span>Etapa actual</span><strong>{({category:"Producto y categoría", technical:"Ficha técnica", prices:"Precio y logística", images:"Imágenes y lote", review:"Revisión", execution:"Publicación"} as const)[publisherStep]}</strong></div>
+          <div><span>Etapa actual</span><strong>{({category:"Producto y categoría", technical:"Ficha técnica", prices:"Precios", images:"Imágenes", review:"Revisión", execution:"Publicación"} as const)[publisherStep]}</strong></div>
           <div><span>Última acción</span><strong>{lastAction}</strong></div>
           <div><span>Último guardado</span><strong>{lastSavedAt || "Aún no guardada"}{dirty ? " · Cambios pendientes" : ""}</strong></div>
         </section>
@@ -2125,15 +2403,13 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
           <button type="button" className="secondary" onClick={()=>run(resumePreviousJob)}>Consultar trabajo anterior</button>
         </div>}
         <section className="summaryBar">
-          <div><span>Cuentas</span><b>{publicationAccounts.length ? publicationAccounts.map(account => account.nickname).join(" · ") : "Sin seleccionar"}</b></div>
+          <div><span>Cuenta</span><b>{selectedAccount?.nickname || "Sin seleccionar"}</b></div>
           <div><span>Categoría</span><b>{selectedCategoryName || "Sin seleccionar"}</b></div>
           <div><span>Ficha</span><b className={versionId ? "ok" : ""}>{versionId ? "Guardada" : "Pendiente"}</b></div>
           <div><span>Borradores</span><b>{drafts.length}</b></div>
         </section>
 
         
-
-
 
 
         <section className="card" style={{display: publisherStep === "category" ? undefined : "none"}}>
@@ -2147,16 +2423,6 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
               {selectedAccount && <small className="helper">{selectedAccount.auth_status.replaceAll("_", " ")} · {selectedAccount.site_id}</small>}
             </label>
           </div>
-          {accountId && <div className="multiAccountSelector">
-            <div><b>Publicar también en</b><small>La cuenta principal se usa como referencia para categoría y pricing; cada cuenta seleccionada genera y valida sus propios borradores.</small></div>
-            <div className="multiAccountChoices">
-              {accounts.map(account => <label key={account.id} className={selectedAccountIds.includes(account.id) ? "selected" : ""}>
-                <input type="checkbox" checked={selectedAccountIds.includes(account.id)} disabled={account.id === accountId} onChange={()=>togglePublicationAccount(account.id)}/>
-                <span>{account.nickname}</span>
-              </label>)}
-            </div>
-            <small>{publicationAccounts.length} cuenta(s) · {Math.max(1, Number(form.count) || 1) * Math.max(1, publicationAccounts.length)} publicaciones planificadas.</small>
-          </div>}
 
           {accountId && <div className="publisherStartPanel">
             <div className="publisherStartHeader">
@@ -2183,6 +2449,25 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
                 <span>Completar SKU, producto, categoría y ficha manualmente.</span>
               </button>
             </div>
+
+            {startMode && <div className="multiAccountSelector publisherStartAccounts">
+              <div>
+                <h3>¿En qué cuentas querés publicar?</h3>
+                <p>Seleccioná una o ambas cuentas. La cuenta elegida arriba se usa como referencia para traer la publicación existente y mostrar el pricing; cada cuenta seleccionada se genera, valida y publica de forma independiente.</p>
+              </div>
+              <div className="multiAccountGrid">
+                {accounts.map(account => <label className={`accountCheck ${targetAccountIds.includes(account.id) ? "selected" : ""}`} key={account.id}>
+                  <input
+                    type="checkbox"
+                    checked={targetAccountIds.includes(account.id)}
+                    onChange={event=>setTargetAccountIds(current=>event.target.checked ? Array.from(new Set([...current, account.id])) : current.filter(id=>id!==account.id))}
+                  />
+                  <span>{account.nickname}</span>
+                </label>)}
+              </div>
+              <small>Podés publicar en ambas cuentas en la misma operación. Los borradores, validaciones, títulos, estados y resultados se mantienen separados por cuenta.</small>
+            </div>}
+
             {startMode === "MLA_IMPORT" && <div className="publisherMlaImport">
               <label>MLA de origen
                 <input
@@ -2266,7 +2551,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
         </section>
 
         <section className={`card ${!contextComplete ? "locked" : ""}`} style={{display: ["technical", "prices"].includes(publisherStep) ? undefined : "none"}}>
-          <div className="sectionTitle"><span>2</span> {publisherStep === "prices" ? "Precio y logística" : "Ficha técnica"}</div>
+          <div className="sectionTitle"><span>2</span> {publisherStep === "prices" ? "Precios" : "Ficha técnica"}</div>
           <div style={{display: publisherStep === "technical" ? undefined : "none"}}>
           {(mlaPreview || technicalReuse) && <div className="technicalReusePanel">
             <div className="technicalReuseIntro">
@@ -2286,126 +2571,163 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             <label>Stock<input disabled={!contextComplete} type="number" value={form.quantity} onChange={e=>setForm({...form,quantity:e.target.value})}/></label>
           </div>
           </div>
-          <div style={{display: publisherStep === "prices" ? undefined : "none"}} className="wizardPricingMainPrice">
-            <label>Precio clásico base ARS<input disabled={!contextComplete} type="number" value={form.price} onChange={e=>{setForm({...form,price:e.target.value});setPricingAnalysis(null);setLogisticsQuotes(null);}}/></label>
-            <label>Incremento 3 cuotas (%)<input disabled={!contextComplete} type="number" min="0" max="99" step="0.01" value={installmentIncrements.three} onChange={e=>setInstallmentIncrements(current=>({...current,three:e.target.value}))}/><small>Se aplica siempre sobre el precio clásico base.</small></label>
-            <label>Incremento 6 cuotas (%)<input disabled={!contextComplete} type="number" min="0" max="99" step="0.01" value={installmentIncrements.six} onChange={e=>setInstallmentIncrements(current=>({...current,six:e.target.value}))}/><small>No acumula el incremento de 3 cuotas.</small></label>
-          </div>
-          <div style={{display: publisherStep === "prices" ? undefined : "none"}}>
-          <div className="publisherShippingContext">
-            <div className="publisherContextHeader">
-              <div><h3>Datos de envío</h3><p className="helper blockHelper">Estos datos describen el paquete y se reutilizan para publicación y cálculo de costos. No son parámetros económicos.</p></div>
-            </div>
-            <div className="grid2 shippingPackageGrid">
-              <label>Dimensiones del paquete (L×A×H, cm)<input disabled={!contextComplete} value={simulationPackage.dimensions} onChange={e=>{setSimulationPackage({...simulationPackage, dimensions:e.target.value});setPricingAnalysis(null);setLogisticsQuotes(null);}} placeholder="30x20x10"/></label>
-              <label>Peso del paquete (kg)<input disabled={!contextComplete} type="number" min="0.01" step="0.01" value={simulationPackage.weight} onChange={e=>{setSimulationPackage({...simulationPackage, weight:e.target.value});setPricingAnalysis(null);setLogisticsQuotes(null);}}/></label>
-            </div>
-            <div className="shippingPanel">
-              <div className="shippingPanelHeader">
-                <div><span className="shippingEyebrow">Envío</span><b>Mercado Envíos</b><small>La modalidad técnica se toma de la configuración real de tu cuenta y de la categoría.</small></div>
-                <span className={`shippingStatus ${shippingCapabilities ? "ready" : "pending"}`}>{shippingCapabilitiesLoading ? "Consultando…" : shippingCapabilities ? "Activo" : "Pendiente"}</span>
-              </div>
-              {shippingCapabilitiesError && <div className="shippingCapabilityError">{shippingCapabilitiesError}</div>}
-              {shippingCapabilities && <div className="shippingDecisionGrid">
-                <div className="shippingDecision">
-                  <span>¿Ofrecer Mercado Envíos Flex?</span>
-                  <div className="segmentedChoice" role="group" aria-label="Ofrecer Mercado Envíos Flex">
-                    <button type="button" className={simulationPackage.logisticType !== shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.base_logistic_type}));setPricingAnalysis(null);setLogisticsQuotes(null);}}>No</button>
-                    <button type="button" disabled={!shippingCapabilities.flex_available} className={simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.flex_logistic_type}));setPricingAnalysis(null);setLogisticsQuotes(null);}}>Sí</button>
-                  </div>
-                  <small>{shippingCapabilities.flex_available ? "Flex está habilitado para esta cuenta y categoría." : "Mercado Libre no habilita Flex para este contexto."}</small>
+          <div style={{display: publisherStep === "prices" ? undefined : "none"}} className="publisherPricingUnified">
+            <div className="publisherPricingHeader">
+              <div>
+                <div className="publisherPricingTitleRow">
+                  <h2>Precios</h2>
+                  <span className="pricingConfigPill">ⓘ 3 y 6 cuotas se configuran en Configuración</span>
                 </div>
-                <label>Quién paga el envío<select disabled={!contextComplete} value={simulationPackage.freeShipping} onChange={e=>{setSimulationPackage({...simulationPackage, freeShipping:e.target.value});setPricingAnalysis(null);setLogisticsQuotes(null);}}><option value="">Elegí una opción</option><option value="false">El comprador paga</option><option value="true">Ofrecer envío gratis</option></select><small>Mercado Libre aplicará igualmente las reglas obligatorias de envío gratis cuando correspondan.</small></label>
-              </div>}
-            </div>
-            <div className="logisticsQuotePanel">
-              <div className="logisticsQuoteHeader">
-                <div><b>Costos logísticos reales</b><small>Flex y Mercado Envíos / Colecta se consultan por separado. Si Mercado Libre no devuelve un valor confiable se muestra “No disponible”.</small></div>
-                <button type="button" className="secondary" disabled={!shippingReady || !Number(form.price) || busy} onClick={()=>run(quoteLogistics)}>Cotizar logística</button>
+                <p>Calculá tus costos, compará logística y definí el precio de venta.</p>
               </div>
-              {logisticsQuotes && <div className="logisticsQuoteGrid">
-                {[logisticsQuotes.quotes?.flex, logisticsQuotes.quotes?.collect].map((quote:any) => quote && <div key={quote.label} className={`logisticsQuoteCard ${quote.status === "AVAILABLE" ? "available" : "unavailable"}`}>
-                  <span>{quote.label}</span>
-                  <b>{quote.status === "AVAILABLE" ? money(quote.seller_cost) : "No disponible"}</b>
-                  {quote.status === "AVAILABLE" && <small>Costo bruto {money(quote.gross_cost)} · subsidio {money(quote.subsidy)}</small>}
-                  {quote.reason && <small>{quote.reason}</small>}
-                </div>)}
-              </div>}
-              <div className="pricingLogisticMode">Modalidad usada para pricing: <b>{shippingCapabilities && simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "Flex" : "Mercado Envíos / Colecta"}</b></div>
-            </div>
-          </div>
-
-          </div>
-          <div style={{display: publisherStep === "prices" ? undefined : "none"}}>
-          <div className="economicSimulator pricingProposalPanel">
-            <div className="economicSimulatorHeader">
-              <div><h3>Propuestas de precio</h3><p className="helper blockHelper">Ingresá únicamente el costo del producto. El resto se toma de Configuración y de Mercado Libre.</p></div>
               {!pricingConfigured && <button type="button" className="secondary" onClick={()=>setActiveView("pricing-settings")}>Configurar política económica</button>}
             </div>
-            <div className={`publisherPricingInputs ${activeCommercialAllocations.length > 1 ? "withListingType" : ""}`}>
-              <label className="publisherCostInput">Costo del producto (con IVA)<input disabled={!contextComplete} type="number" min="0" step="0.01" value={productCost} onChange={e=>{setProductCost(e.target.value);setPricingAnalysis(null);}} placeholder="0,00"/><small>Es el único costo que cargás por producto. Los demás costos se administran en Configuración.</small></label>
-              {activeCommercialAllocations.length > 1 && <label>Modalidad a analizar<select disabled={!contextComplete} value={pricingListingTypeId} onChange={e=>{setPricingListingTypeId(e.target.value);setPricingAnalysis(null);}}><option value="">Elegí una modalidad</option>{activeCommercialAllocations.map(option=><option key={option.listing_type_id} value={option.listing_type_id}>{option.listing_type_name}</option>)}</select><small>Este lote usa más de una modalidad de publicación.</small></label>}
-              {activeCommercialAllocations.length === 1 && <div className="pricingResolvedContext"><span>Modalidad</span><b>{activeCommercialAllocations[0].listing_type_name}</b><small>Se toma automáticamente de la configuración del lote.</small></div>}
-            </div>
-            {shippingCapabilities && <div className="pricingShippingSelector">
-              <div>
-                <b>Costo de envío usado en la cuenta</b>
-                <small>Elegí qué modalidad logística debe entrar como resta en el cálculo económico.</small>
-              </div>
-              <div className="segmentedChoice" role="group" aria-label="Modalidad logística para cálculo de precio">
-                <button type="button" className={simulationPackage.logisticType === shippingCapabilities.base_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.base_logistic_type}));setPricingAnalysis(null);}}>Mercado Envíos / Colecta</button>
-                <button type="button" disabled={!shippingCapabilities.flex_available} className={simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "active" : ""} onClick={()=>{setSimulationPackage(current=>({...current,shippingMode:shippingCapabilities.mode,logisticType:shippingCapabilities.flex_logistic_type}));setPricingAnalysis(null);}}>Flex</button>
-              </div>
-            </div>}
-            <div className="pricingProposalActions">
-              <button type="button" disabled={!contextComplete || !pricingConfigured || !Number(productCost) || busy} onClick={()=>run(simulateCurrentPrice)}>{busy ? "Calculando…" : "Calcular propuestas"}</button>
-              <span>Usa la categoría, modalidad y logística ya cargadas en esta ficha.</span>
-            </div>
-            {pricingAnalysis && <div className="publisherPricingStory">
-              {Number(form.price) > 0 && <div className="publisherCurrentPrice">
-                <div><span>Precio actual</span><b>{money(form.price)}</b></div>
-                <div><span>Margen actual</span><b>{Number(pricingAnalysis.analyzed.contribution_margin_pct).toFixed(2)}%</b></div>
-                <div><span>Comisión ML neta</span><b>{money(pricingAnalysis.analyzed.ml_commission_net || 0)}</b></div>
-                <div><span>Cargo fijo ML</span><b>{money(pricingAnalysis.analyzed.fixed_fee || 0)}</b></div>
-                <div><span>Resultado por venta</span><b>{money(pricingAnalysis.analyzed.contribution_margin)}</b></div>
-              </div>}
-              <div className="publisherPricingLedger" aria-label="Cuenta económica por venta">
-                <div className="publisherLedgerTitle">
-                  <div><b>Cuenta por venta</b><small>Detalle neto de ingresos y egresos usado por la calculadora.</small></div>
-                  <span>{shippingCapabilities && simulationPackage.logisticType === shippingCapabilities.flex_logistic_type ? "Flex" : "Mercado Envíos / Colecta"}</span>
-                </div>
-                <div className="publisherLedgerRow income"><span className="sign">+</span><span>Precio neto sin IVA</span><b>{money(pricingAnalysis.analyzed.net_price || 0)}</b></div>
-                {[
-                  ["Costo del producto neto", pricingAnalysis.analyzed.net_cmv],
-                  ["Comisión Mercado Libre neta", pricingAnalysis.analyzed.ml_commission_net],
-                  ["Financiación Mercado Libre neta", pricingAnalysis.analyzed.financing_net],
-                  ["Cargo fijo Mercado Libre neto", pricingAnalysis.analyzed.ml_fixed_fee_net],
-                  ["Costo logístico neto", pricingAnalysis.analyzed.net_logistic_cost],
-                  ["Ingresos Brutos", pricingAnalysis.analyzed.iibb],
-                  ["Publicidad esperada", pricingAnalysis.analyzed.ads_expected],
-                  ["Reintegros esperados", pricingAnalysis.analyzed.refunds_expected],
-                  ["Otros costos configurados", pricingAnalysis.analyzed.additional_unit_cost_net],
-                ].filter(([,value])=>Math.abs(Number(value || 0)) >= 0.005).map(([label,value]) => <div className="publisherLedgerRow" key={String(label)}><span className="sign">−</span><span>{label}</span><b>{money(Number(value || 0))}</b></div>)}
-                <div className="publisherLedgerTotal"><span>=</span><div><b>Margen de contribución</b><small>{Number(pricingAnalysis.analyzed.contribution_margin_pct || 0).toFixed(2)}% del ingreso neto</small></div><strong>{money(pricingAnalysis.analyzed.contribution_margin || 0)}</strong></div>
-              </div>
-              <div className="publisherPricingTargets">
-                {publisherPricingTargets(pricingAnalysis).map(option => <div key={option.key} className={`publisherPricingTarget${option.recommended ? " recommended" : ""}`}>
-                  <div className="publisherPricingTargetHeader"><span>{option.label}</span>{option.recommended && <em>Recomendado</em>}</div>
-                  <b>{money(option.target.gross_price)}</b>
-                  <small>Margen logrado: {Number(option.target.achieved_margin_pct ?? option.target.target_margin_pct).toFixed(2)}%</small>
-                  {option.recommended && <button type="button" onClick={()=>setForm({...form,price:String(pricingAnalysis.recommended_price)})}>Usar este precio</button>}
-                </div>)}
-              </div>
-              <div className="pricingInlineFooter">
-                <span>Recomendación según tu política económica vigente.</span>
-                <button type="button" className="secondary" onClick={openPricingDetail}>Ver detalle en Calculadora</button>
-              </div>
-            </div>}
-          </div>
 
-          <div className="quantityPricingBox">
-            <label className="checkboxLabel"><input type="checkbox" disabled={!contextComplete} checked={quantityPricingEnabled} onChange={e=>setQuantityPricingEnabled(e.target.checked)}/> Publicar precios mayoristas B2B por cantidad</label>
-            <p className="helper blockHelper">Mercado Libre habilita PxQ B2B sólo para vendedores seleccionados. La publicación principal no se pierde si ML rechaza la tabla mayorista; el job lo informa como advertencia.</p>
+            <div className="publisherPricingTopGrid">
+              <label className="publisherPricingField">
+                <span>Costo del producto (con IVA)</span>
+                <div className="moneyInput"><span>$</span><input disabled={!contextComplete} type="number" min="0" step="0.01" value={productCost} onChange={e=>{setProductCost(e.target.value);setPricingAnalysis(null);setBasePrincipalPrice(0);}} placeholder="0,00"/></div>
+                <small>Es el único costo que cargás por producto.</small>
+              </label>
+              <label className="publisherPricingField">
+                <span>Precio de venta (opcional)</span>
+                <div className="moneyInput"><span>$</span><input disabled={!contextComplete} type="number" min="0" step="0.01" value={form.price === "0" ? "" : form.price} onChange={e=>scheduleCustomPriceRecalculation(e.target.value)} placeholder="Ej. 18.990"/></div>
+                <small>Si lo dejás vacío, se calculará automáticamente.</small>
+              </label>
+              <div className="publisherPackageFields">
+                <div className="publisherPackageHeader">
+                  <b>Medidas del paquete</b>
+                  {packageUsesTechnicalData && <span className="technicalAutofillPill">▣ Autocompletado desde ficha técnica</span>}
+                </div>
+                <div className="publisherPackageGrid">
+                  <label>Largo (cm)<input disabled={!contextComplete} type="number" min="0" step="0.01" value={packageParts.length} onChange={e=>updatePackageDimensionPart("length", e.target.value)}/></label>
+                  <label>Ancho (cm)<input disabled={!contextComplete} type="number" min="0" step="0.01" value={packageParts.width} onChange={e=>updatePackageDimensionPart("width", e.target.value)}/></label>
+                  <label>Alto (cm)<input disabled={!contextComplete} type="number" min="0" step="0.01" value={packageParts.height} onChange={e=>updatePackageDimensionPart("height", e.target.value)}/></label>
+                  <label>Peso (kg)<input disabled={!contextComplete} type="number" min="0.01" step="0.01" value={simulationPackage.weight} onChange={e=>{setSimulationPackage(current=>({...current,weight:e.target.value}));setPricingAnalysis(null);setLogisticsQuotes(null);}}/></label>
+                </div>
+                <small>Si falta algún dato, podés completarlo manualmente.</small>
+              </div>
+            </div>
+
+            <div className="publisherPricingWorkspace">
+              <div className="publisherPricingWorkbench">
+                <section className="publisherLogisticsSection">
+                  <div className="publisherPricingSubheader">
+                    <div><h3>Logística</h3><p>Compará las opciones y elegí cuál usar en el cálculo principal.</p></div>
+                    <span>Flex se ofrece siempre{shippingCapabilities && !shippingCapabilities.flex_available ? " cuando Mercado Libre lo habilita." : "."}</span>
+                  </div>
+                  {shippingCapabilitiesError && <div className="shippingCapabilityError">{shippingCapabilitiesError}</div>}
+                  <div className="publisherLogisticsCards">
+                    <button
+                      type="button"
+                      className={`publisherLogisticsCard ${pricingLogisticType === shippingCapabilities?.base_logistic_type ? "selected" : ""}`}
+                      disabled={!shippingCapabilities || pricingRecalculationBusy}
+                      onClick={()=>shippingCapabilities && void selectPricingLogistics(shippingCapabilities.base_logistic_type)}
+                    >
+                      <div className="publisherLogisticsCardTitle"><span className="radioDot"/><b>Mercado Envíos / Colecta</b>{pricingLogisticType === shippingCapabilities?.base_logistic_type && <em>Seleccionada</em>}</div>
+                      <div className="publisherLogisticsCardBody">
+                        <div><strong>{logisticsQuotes?.colecta?.available ? money(logisticsQuotes.colecta.seller_cost) : "—"}</strong><small>Costo logístico estimado</small></div>
+                        <div className="publisherLogisticsMeta"><span>Modalidad: {shippingCapabilities?.base_logistic_type || "Pendiente"}</span><span>{logisticsQuotes?.colecta?.available ? "Cotización real de Mercado Libre" : "Calculá para cotizar"}</span></div>
+                      </div>
+                    </button>
+                    <button
+                      type="button"
+                      className={`publisherLogisticsCard ${pricingLogisticType === shippingCapabilities?.flex_logistic_type ? "selected" : ""}`}
+                      disabled={!shippingCapabilities?.flex_available || pricingRecalculationBusy}
+                      onClick={()=>shippingCapabilities?.flex_available && void selectPricingLogistics(shippingCapabilities.flex_logistic_type)}
+                    >
+                      <div className="publisherLogisticsCardTitle"><span className="radioDot"/><b>Flex</b>{pricingLogisticType === shippingCapabilities?.flex_logistic_type && <em>Seleccionada</em>}</div>
+                      <div className="publisherLogisticsCardBody">
+                        <div><strong>{logisticsQuotes?.flex?.available ? money(logisticsQuotes.flex.seller_cost) : "—"}</strong><small>Costo logístico estimado</small></div>
+                        <div className="publisherLogisticsMeta"><span>Modalidad: {shippingCapabilities?.flex_logistic_type || "self_service"}</span><span>{shippingCapabilities?.flex_available ? (logisticsQuotes?.flex?.available ? "Cotización real de Mercado Libre" : "Calculá para cotizar") : "No habilitado para esta cuenta/categoría"}</span></div>
+                      </div>
+                    </button>
+                  </div>
+                  <div className="publisherLogisticsFooter">
+                    <label>Quién paga el envío
+                      <select disabled={!contextComplete} value={simulationPackage.freeShipping} onChange={e=>{setSimulationPackage(current=>({...current,freeShipping:e.target.value}));setPricingAnalysis(null);setLogisticsQuotes(null);}}>
+                        <option value="">Elegí una opción</option>
+                        <option value="false">El comprador paga</option>
+                        <option value="true">Ofrecer envío gratis</option>
+                      </select>
+                    </label>
+                    {activeCommercialAllocations.length > 1
+                      ? <label>Modalidad de publicación
+                        <select disabled={!contextComplete} value={pricingListingTypeId} onChange={e=>{setPricingListingTypeId(e.target.value);setPricingAnalysis(null);setLogisticsQuotes(null);}}>
+                          <option value="">Elegí una modalidad</option>
+                          {activeCommercialAllocations.map(option=><option key={option.listing_type_id} value={option.listing_type_id}>{option.listing_type_name}</option>)}
+                        </select>
+                      </label>
+                      : activeCommercialAllocations.length === 1 && <div className="pricingResolvedContext compact"><span>Modalidad</span><b>{activeCommercialAllocations[0].listing_type_name}</b><small>Se toma de la configuración del lote.</small></div>}
+                  </div>
+                </section>
+
+                <section className="publisherMarginSection">
+                  <div className="publisherPricingSubheader">
+                    <div><h3>Cálculo por Mercado Libre</h3><p>Elegí el margen deseado o personalizá el precio. Se calculan los costos automáticamente.</p></div>
+                  </div>
+                  <div className="publisherMarginControls">
+                    <div className="publisherMarginSelector" role="group" aria-label="Margen de contribución objetivo">
+                      {([
+                        ["mc0", 0, "MC 0%"],
+                        ["mc15", 15, "MC 15%"],
+                        ["mc20", 20, "MC 20%"],
+                        ["mc25", 25, "MC 25%"],
+                        ["mc35", 35, "MC 35%"],
+                      ] as const).map(([key, margin, label]) => <button
+                        key={key}
+                        type="button"
+                        className={pricingScenario === key && priceVariant === "base" ? "active" : ""}
+                        disabled={!pricingAnalysis || pricingRecalculationBusy}
+                        onClick={()=>void chooseMarginScenario(key, margin)}
+                      >{label}</button>)}
+                      <button type="button" className={pricingScenario === "custom" && priceVariant === "base" ? "active" : ""} onClick={()=>setPricingScenario("custom")}>Personalizado</button>
+                    </div>
+                    <label className="publisherCustomPrice">Precio personalizado
+                      <div className="moneyInput"><span>$</span><input disabled={!contextComplete} type="number" min="0.01" step="0.01" value={pricingScenario === "custom" && priceVariant === "base" && form.price !== "0" ? form.price : ""} onChange={e=>scheduleCustomPriceRecalculation(e.target.value)} placeholder="Ej. 24.990"/></div>
+                      <small>Se recalcula automáticamente al dejar de escribir.</small>
+                    </label>
+                  </div>
+                  <div className="publisherPricingPrimaryActions">
+                    <button type="button" disabled={!contextComplete || !pricingConfigured || !Number(productCost) || busy || pricingRecalculationBusy} onClick={()=>run(()=>simulateCurrentPrice({salePrice:Number(form.price)>0?Number(form.price):null,scenario:Number(form.price)>0?"custom":undefined,variant:"base",updateBase:true}))}>{busy || pricingRecalculationBusy ? "Calculando…" : "Calcular"}</button>
+                    <span>Usa la categoría, modalidad y logística cargadas en esta ficha.</span>
+                  </div>
+                </section>
+              </div>
+
+              <aside className="publisherPriceSummary">
+                <div className="publisherPriceSummaryHeader"><h3>Precio principal</h3><p>{priceVariant === "3" ? "Variante para 3 cuotas" : priceVariant === "6" ? "Variante para 6 cuotas" : pricingScenario === "custom" ? "Precio personalizado" : `Precio según ${pricingScenario.replace("mc", "MC ")}%`}</p></div>
+                <div className="publisherPrincipalPrice">{displayedPrincipalPrice > 0 ? money(displayedPrincipalPrice) : "—"}</div>
+                <div className="publisherInstallmentActions">
+                  <button type="button" className={priceVariant === "3" ? "active" : ""} disabled={!installmentBasePrice || pricingRecalculationBusy} onClick={()=>run(()=>calculateInstallmentVariant(3))}>
+                    <span>▤ Calcular precio 3 cuotas</span><b>{installment3Price ? money(installment3Price) : "—"}</b>
+                  </button>
+                  <button type="button" className={priceVariant === "6" ? "active" : ""} disabled={!installmentBasePrice || pricingRecalculationBusy} onClick={()=>run(()=>calculateInstallmentVariant(6))}>
+                    <span>▤ Calcular precio 6 cuotas</span><b>{installment6Price ? money(installment6Price) : "—"}</b>
+                  </button>
+                </div>
+                <div className="publisherInstallmentPreview">
+                  <div><span>3 cuotas</span><b>{installment3Price ? `${money(installment3Price / 3)} × 3` : "—"}</b><small>+{pricingProfile.installment_3_markup_pct}% sobre precio principal</small></div>
+                  <div><span>6 cuotas</span><b>{installment6Price ? `${money(installment6Price / 6)} × 6` : "—"}</b><small>+{pricingProfile.installment_6_markup_pct}% sobre precio principal</small></div>
+                </div>
+                {selectedPricingBreakdown ? <div className="publisherPriceLedger">
+                  <div><span>Costo del producto (con IVA)</span><b>{money(selectedPricingBreakdown.gross_cmv || Number(productCost))}</b></div>
+                  <div><span>Comisión Mercado Libre</span><b>− {money(selectedPricingBreakdown.ml_commission_net || 0)}</b></div>
+                  {Number(selectedPricingBreakdown.financing_net || 0) > 0 && <div><span>Financiación Mercado Libre</span><b>− {money(selectedPricingBreakdown.financing_net)}</b></div>}
+                  <div><span>Cargo fijo por venta</span><b>− {money(selectedPricingBreakdown.fixed_fee || 0)}</b></div>
+                  <div><span>Costo logístico neto</span><b>− {money(selectedPricingBreakdown.net_logistic_cost || 0)}</b></div>
+                  <div><span>IIBB</span><b>− {money(selectedPricingBreakdown.iibb || 0)}</b></div>
+                  <div className="publisherMarginResult"><span>Margen resultante</span><b>{Number(selectedPricingBreakdown.contribution_margin_pct || 0).toFixed(2)}%</b><strong>{money(selectedPricingBreakdown.contribution_margin || 0)}</strong></div>
+                </div> : <div className="publisherPriceSummaryEmpty">Calculá el precio para ver el desglose económico.</div>}
+              </aside>
+            </div>
+
+          <div className="quantityPricingBox publisherWholesalePricing">
+            <div className="publisherWholesaleHeader">
+              <div><h3>Precios mayoristas</h3><span className="wholesalePendingPill">ⓘ Pendiente definir operación exacta en Mercado Libre</span></div>
+              <label className="checkboxLabel"><input type="checkbox" disabled={!contextComplete} checked={quantityPricingEnabled} onChange={e=>setQuantityPricingEnabled(e.target.checked)}/> Habilitar precios por cantidad</label>
+            </div>
+            <p className="helper blockHelper">Mercado Libre habilita PxQ B2B sólo para vendedores seleccionados. La publicación principal se conserva si ML rechaza la tabla mayorista y el job lo informa como advertencia.</p>
             {quantityPricingEnabled && <>
               <div className="quantityPriceRows">
                 {quantityPrices.map((tier,index)=>{
@@ -2522,11 +2844,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             </div>}
           </>}
           </div>
-          {publisherStep === "prices" && <div className="saveProductFooter">
-            <div>
-              <b>Finalizar ficha</b>
-              <small>Guardá cuando termines ficha técnica, logística, calculadora y precios. Éste es el último paso antes de cargar imágenes.</small>
-            </div>
+          {publisherStep === "prices" && <div className="publisherSaveFooter">
             <button
               disabled={!contextComplete || categoryContractLoading || busy || (Boolean(batchId) && drafts.length > 0 && (!shippingReady || !requiredAttributesComplete))}
               onClick={()=>run(batchId && drafts.length > 0 ? saveCorrectionsAndRevalidate : createProduct)}
@@ -2535,13 +2853,13 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
                 ? "Guardar correcciones y revalidar lote"
                 : existingProduct ? "Guardar nueva versión" : "Guardar ficha"}
             </button>
+            {(!shippingReady || !requiredAttributesComplete) && !(batchId && drafts.length > 0) && <p className="helper blockHelper" role="status">
+              Podés guardar la ficha y cargar imágenes aunque falten atributos obligatorios o Mercado Libre no haya confirmado la logística. Esos pendientes deberán resolverse antes de publicar.
+            </p>}
+            {batchId && drafts.length > 0 && <p className="helper blockHelper">
+              Si la validación detecta un dato faltante, completalo acá y guardá las correcciones. La app crea un nuevo snapshot de la ficha, conserva los borradores e imágenes y vuelve a validar el lote sin recargar la página.
+            </p>}
           </div>}
-          {publisherStep === "prices" && (!shippingReady || !requiredAttributesComplete) && !(batchId && drafts.length > 0) && <p className="helper blockHelper" role="status">
-            Podés guardar la ficha y cargar imágenes aunque falten atributos obligatorios o Mercado Libre no haya confirmado la logística. Esos pendientes deberán resolverse antes de publicar.
-          </p>}
-          {publisherStep === "prices" && batchId && drafts.length > 0 && <p className="helper blockHelper">
-            Si la validación detecta un dato faltante, completalo acá y guardá las correcciones. La app crea un nuevo snapshot de la ficha, conserva los borradores e imágenes y vuelve a validar el lote sin recargar la página.
-          </p>}
         </section>
 
         <section className={`card ${!productComplete ? "locked" : ""}`} style={{display: publisherStep === "images" ? undefined : "none"}}>
@@ -2560,41 +2878,48 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
                     : "Todavía no hay imágenes confirmadas por el backend"}
               </span>
             </label>
-            <label>Publicaciones por cuenta
+            <label>Cantidad de publicaciones por cuenta
               <input type="number" min="1" max="100" disabled={!versionId} value={form.count}
                 onChange={e=>setForm({...form,count:e.target.value})}/>
             </label>
           </div>
 
-          {uploadedImages.length > 0 && <>
-            <div className="imageDragHint">Arrastrá las miniaturas para definir el orden. La primera imagen queda como principal.</div>
-            <div className="imageManagerGrid" aria-label="Orden de imágenes">
-              {uploadedImages.map((image,index) => <div
-                className={`imageManagerCard ${index === 0 ? "principal" : ""} ${draggedImageId === image.id ? "dragging" : ""}`}
+          {uploadedImages.length > 0 && <div className="imageManager" aria-label="Gestor de imágenes">
+            <div className="imageManagerHeader">
+              <div><h3>Orden de publicación</h3><p>Arrastrá las miniaturas para reordenarlas. La primera imagen es la principal; el orden se persiste y se usa en todos los borradores.</p></div>
+            </div>
+            <div className="imageManagerGrid">
+              {uploadedImages.map((image, index) => <article
+                className={`imageManagerCard ${index === 0 ? "primary" : ""}`}
                 key={image.id}
                 draggable={!busy}
-                onDragStart={(event)=>{setDraggedImageId(image.id);event.dataTransfer.effectAllowed="move";event.dataTransfer.setData("text/plain",image.id);}}
-                onDragOver={(event)=>{event.preventDefault();event.dataTransfer.dropEffect="move";}}
-                onDrop={(event)=>{
-                  event.preventDefault();
-                  const rect = event.currentTarget.getBoundingClientRect();
-                  const placeAfter = event.clientX > rect.left + rect.width / 2;
-                  void run(()=>dropImageAt(image.id, placeAfter));
+                onDragStart={event => {
+                  event.dataTransfer.setData("text/plain", image.id);
+                  event.dataTransfer.effectAllowed = "move";
                 }}
-                onDragEnd={()=>setDraggedImageId(null)}
+                onDragOver={event => {
+                  event.preventDefault();
+                  event.dataTransfer.dropEffect = "move";
+                }}
+                onDrop={event => {
+                  event.preventDefault();
+                  const sourceId = event.dataTransfer.getData("text/plain");
+                  run(() => reorderImageByDrop(sourceId, image.id));
+                }}
               >
-                <div className="imageDragHandle" aria-hidden="true">⠿</div>
-                <div className="imageManagerPreview">
-                  <img src={`${BASE}/uploads/${image.id}`} alt={image.original_name}/>
-                  {index === 0 && <span>Principal</span>}
+                <div className="imageThumbWrap">
+                  <img src={`/uploads/${image.id}`} alt={image.original_name || `Imagen ${index + 1}`} className="imageThumb"/>
+                  {index === 0 && <span className="primaryImageBadge">Principal</span>}
                 </div>
-                <div className="imageManagerMeta"><b>{index + 1}</b><small>{image.original_name}</small></div>
+                <div className="imageManagerMeta"><b>{index + 1}. {image.original_name}</b><small>Posición {index + 1}</small></div>
                 <div className="imageManagerActions">
-                  <button type="button" className="tiny dangerButton" disabled={busy} onClick={()=>run(()=>deleteUploadedImage(image.id))}>Eliminar</button>
+                  <button type="button" className="tiny secondary" disabled={busy || index === 0} onClick={()=>run(()=>moveImage(index,-1))}>←</button>
+                  <button type="button" className="tiny secondary" disabled={busy || index === uploadedImages.length - 1} onClick={()=>run(()=>moveImage(index,1))}>→</button>
+                  <button type="button" className="tiny dangerButton" disabled={busy} onClick={()=>run(()=>removeUploadedImage(image.id))}>Eliminar</button>
                 </div>
-              </div>)}
+              </article>)}
             </div>
-          </>}
+          </div>}
 
           <div className="installmentBox">
             <div className="installmentHeader">
@@ -2625,7 +2950,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             </p>
           </div>
 
-          <button disabled={!versionId || busy || distributionInvalid} onClick={()=>run(generateDrafts)}>Generar borradores con IA</button>
+          <button disabled={!versionId || busy || distributionInvalid || targetAccountIds.length === 0} onClick={()=>run(generateDrafts)}>Generar borradores multicuenta con IA</button>
         </section>
 
         {drafts.length > 0 && <section className="card wide" style={{display: publisherStep === "review" ? undefined : "none"}}>
@@ -2654,18 +2979,13 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             </div>
             <small>Cache: {keywordIntelligence.cache_status || "-"} · Modelo semántico: {keywordIntelligence.semantic_model || "-"}</small>
           </div>}
-          <div className="b2bReviewPanel">
-            <div><span>Precio normal</span><b>{money(form.price)}</b></div>
-            {quantityPricingSnapshot().publishable.map((tier,index)=><div key={tier.min_purchase_unit}><span>Mayorista nivel {index + 1} · desde {tier.min_purchase_unit}</span><b>{money(tier.amount)}</b></div>)}
-            <div><span>Estado mayoristas</span><b className={quantityPricingEnabled && quantityPricingSnapshot().valid ? "ok" : "muted"}>{quantityPricingEnabled ? (quantityPricingSnapshot().valid ? "Listo para sincronizar" : "Pendiente") : "Sin configurar"}</b></div>
-          </div>
           <div className="tableWrap">
             <table>
               <thead><tr><th>Publicar</th><th>Cuenta</th><th>#</th><th>Título</th><th>Chars</th><th>Modalidad</th><th>Score</th><th>Imgs</th><th>Estado</th><th>Acciones</th></tr></thead>
               <tbody>
                 {drafts.map(d=><tr key={d.id}>
                   <td><input className="draftCheckbox" type="checkbox" checked={selectedDraftIds.includes(d.id)} disabled={d.status !== "APPROVED" || Boolean(job && !terminalJob)} onChange={()=>toggleDraftSelection(d.id)}/></td>
-                  <td><span className="accountPill">{d.account_nickname || accounts.find(account => account.id === d.account_id)?.nickname || "Cuenta"}</span></td>
+                  <td><span className="accountDraftPill">{d.account_nickname || d.account_id || "—"}</span></td>
                   <td>{d.sequence_number}</td>
                   <td className="titleCell">
                     {d.title}
@@ -2681,18 +3001,11 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
                     </div> : null}
                   </td>
                   <td><span className={d.title.length >= 54 ? "charCount good" : "charCount"}>{d.title.length}/60</span></td>
-                  <td className="draftCommercialCell">
-                    <span className="installmentPill">{d.commercial_config?.commercial_label || d.commercial_config?.listing_type_name || "Mercado Libre"}</span>
-                    {String(d.commercial_config?.commercial_intent || "").includes("INSTALLMENTS") && <select value={d.commercial_config?.installments_count || ""} onChange={e=>run(()=>updateDraftCommercial(d.id,{installments_count:e.target.value ? Number(e.target.value) : null}))}>
-                      <option value="">Precio clásico</option><option value="3">3 cuotas</option><option value="6">6 cuotas</option>
-                    </select>}
-                    <small>{d.commercial_config?.price_override ? `Override ${money(d.commercial_config.price_override)}` : "Precio por regla"}</small>
-                  </td>
+                  <td><span className="installmentPill">{d.commercial_config?.commercial_label || d.commercial_config?.listing_type_name || "Mercado Libre"}</span></td>
                   <td><strong>{d.score}</strong></td>
                   <td>{d.image_order.length}</td>
                   <td><span className={`pill ${d.status.toLowerCase()}`}>{d.status}</span></td>
                   <td className="rowActions">
-                    <button className="tiny secondary" onClick={()=>run(()=>editDraftPriceOverride(d))}>Precio</button>
                     <button className="tiny secondary" onClick={()=>run(()=>validateDraft(d.id))}>Validar</button>
                     {d.status==="READY" && <button className="tiny" onClick={()=>run(()=>approveDraft(d.id))}>Aprobar</button>}
                   </td>
@@ -2706,7 +3019,7 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
         {publisherStep === "execution" && !job && <div className="card wizardEmpty">Seleccioná y publicá borradores aprobados desde Revisión para ver la ejecución.</div>}
         {job && <section className="card" style={{display: publisherStep === "execution" ? undefined : "none"}}>
           <div className="toolbar executionHeader">
-            <div className="sectionTitle"><span>6</span> Ejecución</div>
+            <div className="sectionTitle"><span>5</span> Ejecución</div>
             {terminalJob && job.succeeded > 0 &&
               <button className="excelButton" onClick={()=>run(exportExcel)}>Descargar Excel MLA + SKU</button>}
           </div>
@@ -2743,10 +3056,10 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             </div>)}
           </div>}
         </section>}
-        <div className="wizardNavigation wizardNavigationBottom" role="navigation" aria-label="Navegación de la ficha">
+        <div className="wizardNavigation" role="navigation" aria-label="Navegación de la ficha">
           <div className="wizardNavigationHeading">
-            <strong>{({category: "Producto y categoría", technical: "Ficha técnica", prices: "Precio y logística", images: "Imágenes y lote", review: "Revisión", execution: "Publicación"} as const)[publisherStep]}</strong>
-            <span>Terminá esta sección y continuá desde acá para mantener el flujo de trabajo de arriba hacia abajo.</span>
+            <strong>{({category: "Producto y categoría", technical: "Ficha técnica", prices: "Precios", images: "Imágenes", review: "Revisión", execution: "Publicación"} as const)[publisherStep]}</strong>
+            <span>Podés navegar libremente. Los campos conservan su contenido mientras cambiás de etapa.</span>
           </div>
           <div className="wizardNavigationActions">
             <button type="button" className="secondary" disabled={publisherStep === "category"} onClick={() => setPublisherStep((current) => {
@@ -2756,24 +3069,23 @@ function App({operatorRole}: {operatorRole: "ADMIN" | "SUPERVISOR" | "OPERATOR"}
             <button type="button" disabled={publisherStep === "execution"} onClick={() => setPublisherStep((current) => {
               const steps = ["category", "technical", "prices", "images", "review", "execution"] as const;
               return steps[Math.min(steps.length - 1, steps.indexOf(current) + 1)];
-            })}>Continuar →</button>
+            })}>Siguiente →</button>
           </div>
         </div>
+
       </main>
 
-
-
-      {validationProgress.active && <div className="modalBackdrop progressBackdrop">
+      {validationActive && <div className="modalBackdrop progressBackdrop">
         <div className="modal progressModal validationProgressModal">
           <div className="spinner"/>
-          <h2>{validationProgress.scope === "all" ? "Validando lote" : "Validando borrador"}</h2>
-          <p>{validationProgress.message}</p>
+          <h2>Validando con Mercado Libre</h2>
+          <p>Estamos comprobando atributos, logística, imágenes y contrato de publicación con la API real de Mercado Libre.</p>
           <div className="progressSteps">
-            <span>Verificando ficha, atributos, logística, imágenes y configuración comercial</span>
-            <span>Ejecutando la prevalidación real contra Mercado Libre</span>
-            <span>Consolidando errores y advertencias antes de habilitar la aprobación</span>
+            <span>Preparando payload de validación</span>
+            <span>Consultando reglas de la cuenta y categoría</span>
+            <span>Consolidando observaciones y errores</span>
           </div>
-          <small>No mostramos porcentajes simulados: esta ventana permanece activa hasta recibir el resultado real del backend.</small>
+          <small>La ficha permanece guardada. La validación no publica ni modifica una publicación existente.</small>
         </div>
       </div>}
 

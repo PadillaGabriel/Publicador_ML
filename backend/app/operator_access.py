@@ -53,8 +53,6 @@ def required_action(path: str, method: str) -> str | None:
         return "publish"
     if path.startswith("/api/jobs"):
         return "publish"
-    if path.startswith("/api/manager"):
-        return "publish"
     if path.startswith("/api/title-intelligence"):
         return "create_product"
     if path.startswith("/api/catalog"):
@@ -75,14 +73,13 @@ async def operator_access_middleware(request: Request, call_next):
                 if user.role == "OPERATOR" and path.startswith((
                     "/api/accounts", "/api/drafts", "/api/publication", "/api/jobs",
                     "/api/products", "/api/title-intelligence", "/api/publication-import",
-                    "/api/pricing", "/api/catalog", "/api/manager",
                 )):
                     # Do not interpret form or multipart bodies as account identifiers.
                     # Requests with invalid JSON fail closed in the scope service.
                     payload = None
                     if request.method not in SAFE_METHODS and path.startswith((
                         "/api/drafts", "/api/publication", "/api/publication-import",
-                        "/api/title-intelligence", "/api/pricing",
+                        "/api/title-intelligence",
                     )):
                         try:
                             payload = await request.json()

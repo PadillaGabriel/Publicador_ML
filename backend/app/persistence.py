@@ -297,6 +297,8 @@ class PricingProfile(Base):
     currency_id: Mapped[str] = mapped_column(String(10), default="ARS")
     target_margin_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=Decimal("20"))
     minimum_margin_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=Decimal("10"))
+    installment_3_markup_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=Decimal("0"))
+    installment_6_markup_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=Decimal("0"))
     vat_rate_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=Decimal("21"))
     iibb_rate_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=Decimal("0"))
     ads_rate_pct: Mapped[Decimal] = mapped_column(Numeric(7, 4), default=Decimal("0"))

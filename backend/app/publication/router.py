@@ -12,9 +12,7 @@ from app.accounts.service import load_access_token
 from app.audit.service import audit
 from app.core.db import get_db
 from app.operator_auth import request_identity
-from app.operator_account_scope import ensure_account, ensure_product
 from app.core.enums import DraftStatus, JobItemStatus, JobStatus
-from app.core.time import utcnow
 from app.persistence import (
     DraftBatch,
     Job,
@@ -27,11 +25,10 @@ from app.persistence import (
 from app.publication.commercial import fetch_commercial_options
 from app.publication.export import build_job_export_xlsx
 from app.integrations.mercadolibre.client import MercadoLibreClient, MercadoLibreError
-from app.publication.payload import build_item_payload, ordered_image_urls, resolved_price_for_draft
+from app.publication.payload import build_item_payload, ordered_image_urls
 from app.publication.preflight import validate_draft_with_mercadolibre
 from app.publication.shipping import ShippingCapabilityError, fetch_shipping_capabilities
 from app.publication.validation import validate_draft
-from app.publication.quantity_pricing import QuantityPricingSyncError, normalize_b2b_quantity_prices, sync_b2b_quantity_prices
 
 logger = logging.getLogger("ml-publication")
 router = APIRouter(prefix="/api/publication", tags=["publication"])
@@ -42,7 +39,7 @@ class BatchAction(BaseModel):
     draft_ids: list[uuid.UUID] | None = None
 
 
-class ConsolidatedJobAction(BaseModel):
+class MultiDraftAction(BaseModel):
     draft_ids: list[uuid.UUID]
 
 
@@ -243,9 +240,9 @@ def create_publication_job(payload: BatchAction, request: Request, db: Session =
     return {"job_id": job.id, "total": job.total, "status": job.status}
 
 
-@router.post("/jobs/consolidated")
-def create_consolidated_publication_job(
-    payload: ConsolidatedJobAction, request: Request, db: Session = Depends(get_db)
+@router.post("/jobs/multi")
+def create_multi_account_publication_job(
+    payload: MultiDraftAction, request: Request, db: Session = Depends(get_db)
 ):
     if not payload.draft_ids:
         raise HTTPException(status_code=422, detail="Seleccioná al menos un borrador aprobado.")
@@ -256,58 +253,39 @@ def create_consolidated_publication_job(
         select(PublicationDraft).where(PublicationDraft.id.in_(payload.draft_ids))
     ).all())
     by_id = {draft.id: draft for draft in drafts}
-    missing = [str(value) for value in payload.draft_ids if value not in by_id]
+    missing = [draft_id for draft_id in payload.draft_ids if draft_id not in by_id]
     if missing:
-        raise HTTPException(status_code=404, detail={"message": "Borradores inexistentes.", "draft_ids": missing})
-    ordered = [by_id[value] for value in payload.draft_ids]
-    invalid_state = [draft for draft in ordered if draft.status != DraftStatus.APPROVED]
-    if invalid_state:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": "Todos los borradores deben estar APPROVED antes de publicar.",
-                "draft_ids": [str(draft.id) for draft in invalid_state],
-            },
-        )
+        raise HTTPException(status_code=404, detail="Uno o más borradores no existen.")
+    ordered = [by_id[draft_id] for draft_id in payload.draft_ids]
+    not_approved = [draft for draft in ordered if draft.status != DraftStatus.APPROVED]
+    if not_approved:
+        raise HTTPException(status_code=409, detail="Todos los borradores del job consolidado deben estar APPROVED.")
 
-    already_published = set(db.scalars(
-        select(Publication.draft_id).where(Publication.draft_id.in_(payload.draft_ids))
-    ).all())
-    if already_published:
-        raise HTTPException(
-            status_code=409,
-            detail={
-                "message": "Uno o más borradores ya tienen una publicación persistida.",
-                "draft_ids": [str(value) for value in already_published],
-            },
-        )
-
-    validation_failures: list[dict] = []
-    accounts: set[str] = set()
+    validation_failures = []
+    account_ids: set[str] = set()
     for draft in ordered:
         batch = db.get(DraftBatch, draft.batch_id)
         version = db.get(ProductVersion, batch.product_version_id) if batch else None
         if batch is None or version is None:
-            validation_failures.append({
-                "draft_id": str(draft.id),
-                "errors": [{"code": "MISSING_PRODUCT_VERSION", "message": "La ficha del borrador ya no existe."}],
-            })
-            continue
-        accounts.add(str(batch.account_id))
+            raise HTTPException(status_code=409, detail="El lote o la versión de producto ya no existe.")
+        account_ids.add(str(batch.account_id))
         errors, _warnings = validate_draft(db, draft)
         if not errors:
             try:
-                errors.extend(validate_draft_with_mercadolibre(
-                    db, draft, _image_urls(request, version, draft)
-                ))
+                errors.extend(
+                    validate_draft_with_mercadolibre(
+                        db, draft, _image_urls(request, version, draft)
+                    )
+                )
             except MercadoLibreError as exc:
                 raise HTTPException(
                     status_code=502,
-                    detail="Mercado Libre no pudo ejecutar la validación previa del job consolidado.",
+                    detail="Mercado Libre no pudo ejecutar la validación previa multicuenta.",
                 ) from exc
         if errors:
             validation_failures.append({
                 "draft_id": str(draft.id),
+                "account_id": str(batch.account_id),
                 "sequence_number": draft.sequence_number,
                 "title": draft.title,
                 "errors": errors,
@@ -317,125 +295,44 @@ def create_consolidated_publication_job(
             status_code=409,
             detail={
                 "code": "DRAFTS_NOT_PUBLISHABLE",
-                "message": "El job consolidado contiene borradores no publicables.",
+                "message": "Uno o más borradores multicuenta no pasan la validación previa.",
                 "drafts": validation_failures,
             },
         )
 
+    already_published = set(db.scalars(
+        select(Publication.draft_id).where(Publication.draft_id.in_(payload.draft_ids))
+    ).all())
+    eligible = [draft for draft in ordered if draft.id not in already_published]
+    if not eligible:
+        raise HTTPException(status_code=409, detail="Todos los borradores seleccionados ya fueron publicados.")
+
     actor, _ = request_identity(db, request)
-    job = Job(
-        total=len(ordered),
-        status=JobStatus.PENDING,
-        requested_by_user_id=actor.id,
-        type="PUBLICATION_MULTI_ACCOUNT" if len(accounts) > 1 else "PUBLICATION",
-    )
+    job = Job(total=len(eligible), status=JobStatus.PENDING, requested_by_user_id=actor.id)
     db.add(job)
     db.flush()
-    for draft in ordered:
+    for draft in eligible:
         db.add(JobItem(job_id=job.id, draft_id=draft.id, status=JobItemStatus.PENDING))
     audit(
-        db,
-        "PUBLICATION_CONSOLIDATED_JOB_CREATED",
-        "Job",
-        str(job.id),
+        db, "MULTI_ACCOUNT_PUBLICATION_JOB_CREATED", "Job", str(job.id),
         {
-            "count": len(ordered),
-            "draft_ids": [str(draft.id) for draft in ordered],
-            "account_ids": sorted(accounts),
+            "count": len(eligible),
+            "account_ids": sorted(account_ids),
+            "draft_ids": [str(draft.id) for draft in eligible],
         },
         actor_user_id=actor.id,
     )
     db.commit()
+    logger.info(
+        "multi_account_publication_job_created job=%s drafts=%d accounts=%d",
+        job.id, job.total, len(account_ids),
+    )
     return {
         "job_id": job.id,
         "total": job.total,
         "status": job.status,
-        "type": job.type,
-        "account_ids": sorted(accounts),
+        "account_count": len(account_ids),
     }
-
-
-@router.post("/publications/{publication_id}/retry-b2b")
-def retry_publication_b2b(
-    publication_id: uuid.UUID, request: Request, db: Session = Depends(get_db)
-):
-    actor, _ = request_identity(db, request)
-    publication = db.get(Publication, publication_id)
-    if publication is None:
-        raise HTTPException(status_code=404, detail="Publication not found.")
-    draft = db.get(PublicationDraft, publication.draft_id)
-    batch = db.get(DraftBatch, draft.batch_id) if draft else None
-    version = db.get(ProductVersion, batch.product_version_id) if batch else None
-    if draft is None or batch is None or version is None:
-        raise HTTPException(status_code=409, detail="La publicación perdió su contexto interno de origen.")
-    if actor.role == "OPERATOR":
-        ensure_account(db, actor, publication.account_id)
-        ensure_product(db, actor, version.product_master_id)
-    if not publication.item_id:
-        raise HTTPException(status_code=409, detail="La publicación todavía no tiene MLA.")
-
-    publication_price = resolved_price_for_draft(version, draft)
-    tiers = normalize_b2b_quantity_prices(version.commercial, base_price=publication_price)
-    if not tiers:
-        raise HTTPException(status_code=409, detail="La ficha no tiene precios mayoristas publicables configurados.")
-
-    response = dict(publication.external_response or {})
-    response["_quantity_price_sync"] = {
-        "status": "SYNCING",
-        "updated_at": utcnow().isoformat(),
-        "mla": publication.item_id,
-        "account_id": str(publication.account_id),
-        "retry_requested_by_user_id": str(actor.id),
-    }
-    publication.external_response = response
-    db.commit()
-
-    token = load_access_token(db, publication.account_id)
-    client = MercadoLibreClient(token)
-    try:
-        result = sync_b2b_quantity_prices(
-            client,
-            item_id=publication.item_id,
-            tiers=tiers,
-            currency_id=version.currency_id,
-            base_price=publication_price,
-        )
-    except (QuantityPricingSyncError, MercadoLibreError) as exc:
-        response = dict(publication.external_response or {})
-        response["_quantity_price_sync"] = {
-            "status": "FAILED",
-            "updated_at": utcnow().isoformat(),
-            "error": {"message": str(exc), "type": type(exc).__name__},
-            "mla": publication.item_id,
-            "account_id": str(publication.account_id),
-            "requested_by_user_id": str(actor.id),
-        }
-        publication.external_response = response
-        audit(
-            db, "PUBLICATION_B2B_RETRY_FAILED", "Publication", str(publication.id),
-            response["_quantity_price_sync"], actor_user_id=actor.id
-        )
-        db.commit()
-        raise HTTPException(status_code=409, detail=response["_quantity_price_sync"]) from exc
-
-    response = dict(publication.external_response or {})
-    response["_quantity_price_sync"] = {
-        "status": "PUBLISHED",
-        "updated_at": utcnow().isoformat(),
-        "http_status": result["http_status"],
-        "verified": result.get("verified") or [],
-        "verified_version": result.get("verified_version"),
-        "mla": publication.item_id,
-        "account_id": str(publication.account_id),
-        "requested_by_user_id": str(actor.id),
-    }
-    publication.external_response = response
-    audit(
-        db, "PUBLICATION_B2B_RETRY_SUCCEEDED", "Publication", str(publication.id),
-        response["_quantity_price_sync"], actor_user_id=actor.id
-    )
-    db.commit()
-    return response["_quantity_price_sync"]
 
 
 @router.get("/jobs/{job_id}/export.xlsx")

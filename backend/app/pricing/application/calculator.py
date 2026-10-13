@@ -255,7 +255,7 @@ class PricingCalculatorService:
             target_margin_pct=request.target_margin_pct,
             overrides=request.overrides.model_dump(),
             context=context,
-            seed_price=baseline.current_price,
+            seed_price=request.sale_price or baseline.current_price,
         )
 
     def _calculate(

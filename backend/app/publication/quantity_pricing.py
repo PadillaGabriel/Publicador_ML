@@ -200,51 +200,6 @@ def b2b_percentage_payload(
     return {"price_per_quantity": desired}
 
 
-
-def _verify_percentage_payload(current_prices: dict, requested: dict) -> list[dict]:
-    actual: dict[int, Decimal] = {}
-    for node in current_prices.get("price_per_quantity") or []:
-        if not isinstance(node, dict) or "user_type_business" not in _contexts(node):
-            continue
-        conditions = node.get("conditions") or {}
-        quantity = int(conditions.get("min_purchase_unit") or 0)
-        if quantity <= 1:
-            continue
-        try:
-            actual[quantity] = _percentage(node.get("percentage"))
-        except QuantityPricingSyncError:
-            continue
-
-    verified: list[dict] = []
-    missing: list[int] = []
-    mismatched: list[int] = []
-    for desired in requested.get("price_per_quantity") or []:
-        conditions = desired.get("conditions") or {}
-        quantity = int(conditions.get("min_purchase_unit") or 0)
-        expected = _percentage(desired.get("percentage"))
-        current = actual.get(quantity)
-        if current is None:
-            missing.append(quantity)
-            continue
-        if abs(current - expected) > PERCENTAGE_QUANT:
-            mismatched.append(quantity)
-            continue
-        verified.append({"min_purchase_unit": quantity, "percentage": float(current)})
-
-    if missing or mismatched:
-        detail = []
-        if missing:
-            detail.append("faltan cantidades " + ", ".join(map(str, missing)))
-        if mismatched:
-            detail.append("porcentaje distinto para " + ", ".join(map(str, mismatched)))
-        raise QuantityPricingSyncError(
-            "Mercado Libre respondió la escritura B2B pero la lectura posterior no confirmó el estado: "
-            + "; ".join(detail)
-            + "."
-        )
-    return verified
-
-
 def sync_b2b_quantity_prices(
     client: MercadoLibreClient,
     *,
@@ -280,17 +235,41 @@ def sync_b2b_quantity_prices(
         version=str(version),
         remove_absolute_pxq=_has_absolute_b2b(current),
     )
-    # A successful write status is not enough: query Mercado Libre again and
-    # only report success when the requested B2B percentages are visible.
-    verified_prices = client.item_prices(item_id, show_all=True, display_version=True)
-    verified = _verify_percentage_payload(verified_prices, payload)
+
+    # A 2xx write response is not sufficient evidence that Mercado Libre persisted
+    # the B2B table. Re-read the item prices and verify the exact quantity/percentage
+    # contract requested before reporting success to the worker.
+    verified = client.item_prices(item_id, show_all=True, display_version=True)
+    actual: dict[int, Decimal] = {}
+    for node in verified.get("price_per_quantity") or []:
+        if not isinstance(node, dict) or "user_type_business" not in _contexts(node):
+            continue
+        conditions = node.get("conditions") or {}
+        quantity = int(conditions.get("min_purchase_unit") or 0)
+        percentage = _percentage(node.get("percentage")) if node.get("percentage") is not None else None
+        if quantity > 1 and percentage is not None:
+            actual[quantity] = percentage.quantize(PERCENTAGE_QUANT)
+
+    expected = {
+        int(node["conditions"]["min_purchase_unit"]): _percentage(node["percentage"]).quantize(PERCENTAGE_QUANT)
+        for node in payload["price_per_quantity"]
+    }
+    if actual != expected:
+        raise QuantityPricingSyncError(
+            "Mercado Libre respondió la actualización B2B pero la verificación posterior no coincide con lo solicitado."
+        )
+
     return {
         "request": payload,
         "response": response.payload,
         "http_status": response.status_code,
         "version": str(version),
+        "verified_version": verified.get("version"),
+        "verified": True,
+        "verified_price_per_quantity": [
+            {"min_purchase_unit": quantity, "percentage": float(percentage)}
+            for quantity, percentage in sorted(actual.items())
+        ],
         "standard_amount": standard_amount,
         "recommendations": recommendations.get("recommendations") or [],
-        "verified": verified,
-        "verified_version": str(verified_prices.get("version") or ""),
     }
